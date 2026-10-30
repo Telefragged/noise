@@ -165,11 +165,23 @@
         };
       });
 
-      packages = forAllSystems (pkgs: rec {
-        # Builds only. The `test` check runs the tests.
-        noise = (cargoNixFor pkgs).workspaceMembers."noise".build;
-        default = noise;
-      });
+      packages = forAllSystems (
+        pkgs:
+        let
+          # Builds only. The `test` check runs the tests.
+          noise = (cargoNixFor pkgs).workspaceMembers."noise".build;
+          inherit (cargoToml.workspace.package) version;
+        in
+        # The binary gets its version from Cargo.nix, so a version bump
+        # that skips `crate2nix generate` would ship the old version.
+        assert
+          noise.version == version
+          || throw "Cargo.nix has version ${noise.version}, not ${version}: run crate2nix generate";
+        {
+          inherit noise;
+          default = noise;
+        }
+      );
 
       checks = forAllSystems (pkgs: {
         build = self.packages.${pkgs.system}.noise;
@@ -185,6 +197,24 @@
           nativeBuildInputs = [ self.formatter.${pkgs.system} ];
           buildPhase = "HOME=$TMPDIR treefmt --ci --tree-root .";
           installPhase = "touch $out";
+        };
+      });
+
+      # `nix run .#release-check` prints whether HEAD is a release
+      # (release/check.sh). The release workflow runs it.
+      apps = forAllSystems (pkgs: {
+        release-check = {
+          type = "app";
+          program = "${
+            pkgs.writeShellApplication {
+              name = "release-check";
+              runtimeInputs = [
+                pkgs.git
+                pkgs.taplo
+              ];
+              text = builtins.readFile ./release/check.sh;
+            }
+          }/bin/release-check";
         };
       });
 

@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+# One run at a time, so two pushes cannot both publish the same version.
+concurrency: release
+
+jobs:
+  release:
+    # Off until the first release. No release tag exists yet, so the first
+    # push to master that runs this job publishes the version in Cargo.toml.
+    # Removing this line is the first release.
+    if: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nit-ci-cache
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - id: check
+        run: nix run .#release-check
+      - if: steps.check.outputs.release == 'true'
+        run: |
+          nix build .#noise
+          cp result/bin/noise noise-x86_64-linux
+          sha256sum noise-x86_64-linux > noise-x86_64-linux.sha256
+      - if: steps.check.outputs.release == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: noise-x86_64-linux
+      - if: steps.check.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
+            noise-x86_64-linux noise-x86_64-linux.sha256
