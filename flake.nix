@@ -153,6 +153,14 @@
 
             # Regenerates Cargo.nix
             crate2nix
+
+            # Formatting — treefmt runs the per-language formatters
+            # configured in treefmt.toml (rustfmt from the toolchain above)
+            treefmt
+            nixfmt
+            prettier
+            shfmt
+            taplo
           ];
         };
       });
@@ -171,6 +179,32 @@
         test = (cargoNixFor pkgs).workspaceMembers."noise".build.override {
           runTests = true;
         };
+        treefmt = pkgs.stdenvNoCC.mkDerivation {
+          name = "treefmt-check";
+          src = self;
+          nativeBuildInputs = [ self.formatter.${pkgs.system} ];
+          buildPhase = "HOME=$TMPDIR treefmt --ci --tree-root .";
+          installPhase = "touch $out";
+        };
       });
+
+      # `nix fmt` = the same whole-tree treefmt the devShell runs,
+      # self-contained (formatters on PATH without entering the shell).
+      # rustfmt comes from the pinned toolchain, as in the devShell.
+      formatter = forAllSystems (
+        pkgs:
+        pkgs.writeShellApplication {
+          name = "treefmt";
+          runtimeInputs = with pkgs; [
+            treefmt
+            (rustToolchainFor pkgs)
+            nixfmt
+            prettier
+            shfmt
+            taplo
+          ];
+          text = ''exec treefmt "$@"'';
+        }
+      );
     };
 }
