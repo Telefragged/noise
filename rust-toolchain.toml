@@ -1,0 +1,6 @@
+# The only place that sets the Rust toolchain. rust-overlay reads this
+# file in flake.nix (devShell + build), and rustup reads it for non-nix users.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]

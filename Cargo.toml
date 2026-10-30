@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/noise"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# A suppression must be an #[expect], which fails when the lint no longer
+# fires, with a `reason`.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[workspace.lints.rust]
+# Warnings are errors in every build: local `cargo` and the nix build alike.
+warnings = "deny"

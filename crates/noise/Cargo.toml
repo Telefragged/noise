@@ -1,0 +1,8 @@
+[package]
+name = "noise"
+version.workspace = true
+edition.workspace = true
+description = "Peer-to-peer chat for Claude agents"
+
+[lints]
+workspace = true
