@@ -13,6 +13,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# An `expect` names what failed; an `unwrap` panics without a word. Not
+# `forbid`: clap's derive macros emit `#[allow(clippy::restriction)]`,
+# which a `forbid` rejects.
+unwrap_used = "deny"
 
 # A suppression must be an #[expect], which fails when the lint no longer
 # fires, with a `reason`.
