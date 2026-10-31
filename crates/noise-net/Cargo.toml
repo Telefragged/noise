@@ -8,5 +8,19 @@ description = "The iroh layer of noise: gossip, chunks, joins, and admission"
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 blake3 = { workspace = true }
+bytes = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+n0-future = { workspace = true }
 noise-room = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }

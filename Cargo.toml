@@ -14,12 +14,14 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1"
 blake3 = "1"
+bytes = "1"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
 iroh = "1.4.1"
 iroh-base = { version = "1.4.1", default-features = false, features = ["key"] }
 iroh-gossip = "0.101.0"
+n0-future = "0.3"
 noise-room = { path = "crates/noise-room" }
 noise-store = { path = "crates/noise-store" }
 postcard = { version = "1", features = ["use-std"] }
