@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use iroh::Endpoint;
 use iroh::endpoint::{Builder, presets};
 use iroh_gossip::Gossip;
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noise_net::Node;
 use noise_net::status::{Connections, by_peer};
 use noise_room::Body;
@@ -34,6 +35,10 @@ use crate::watch_socket::{self, Replies, Request, Response, SOCKET_FILE, one};
 /// The lock file that keeps one `noise watch` process per session.
 /// `SessionStart` hooks run again after compaction, with the same id.
 const LOCK_FILE: &str = "watch.lock";
+
+/// The mDNS service under which sessions announce their keys, so that
+/// they find only each other and not other iroh programs.
+const MDNS_SERVICE: &str = "noise";
 
 /// How long `noise room join` waits for the room's first neighbor, so
 /// that a message sent right after the join reaches the room.
@@ -132,6 +137,17 @@ impl Watch {
                     .hooks(self.connections.clone())
                     .bind()
                     .await?;
+                if self.state.config()?.mdns {
+                    let mdns = MdnsAddressLookup::builder()
+                        .service_name(MDNS_SERVICE)
+                        .build(endpoint.id());
+                    match mdns {
+                        Ok(mdns) => endpoint.address_lookup()?.add(mdns),
+                        // Sessions on other networks still find this one
+                        // through a relay.
+                        Err(err) => eprintln!("noise: mDNS is off: {err:#}"),
+                    }
+                }
                 anyhow::Ok(Node::spawn(
                     endpoint,
                     Gossip::builder(),
@@ -370,7 +386,8 @@ mod tests {
     /// receiver of what happens in its rooms.
     async fn watch(root: &Path, name: &str) -> (Arc<Watch>, mpsc::UnboundedReceiver<Arrival>) {
         let config = root.join("config.toml");
-        std::fs::write(&config, format!("name = {name:?}\n")).expect("write");
+        // Multicast would make the tests depend on the network they run on.
+        std::fs::write(&config, format!("name = {name:?}\nmdns = false\n")).expect("write");
         let dir = SessionDir::new(root, "s1");
         let (arrivals, received) = mpsc::unbounded_channel();
         let watch = start(&dir, bind_loopback, config, arrivals)

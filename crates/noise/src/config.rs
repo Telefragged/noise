@@ -8,12 +8,24 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// The settings that every session of the user shares.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// The fixed part of each session's display name, such as `vetle`.
-    #[serde(default)]
     pub name: String,
+    /// Whether sessions announce their keys on the local network with
+    /// mDNS and look other sessions up there, so that sessions on one
+    /// machine or network find each other without a relay.
+    pub mdns: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mdns: true,
+        }
+    }
 }
 
 impl Config {
@@ -60,6 +72,15 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "name = \"vetle\"\n").expect("write");
         assert_eq!(Config::read(&path).expect("config").name, "vetle");
+    }
+
+    #[test]
+    fn mdns_is_on_unless_the_file_turns_it_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        assert!(Config::read(&path).expect("config").mdns);
+        std::fs::write(&path, "mdns = false\n").expect("write");
+        assert!(!Config::read(&path).expect("config").mdns);
     }
 
     #[test]

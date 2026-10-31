@@ -135,13 +135,22 @@ impl SessionState {
         &self.key
     }
 
+    /// The global config.
+    ///
+    /// # Errors
+    ///
+    /// When the config cannot be read.
+    pub fn config(&self) -> Result<Config> {
+        Config::read(&self.config)
+    }
+
     /// This session's name, from the config, and its status.
     ///
     /// # Errors
     ///
     /// When the config or the status file cannot be read.
     pub fn name_and_status(&self) -> Result<(String, String)> {
-        Ok((Config::read(&self.config)?.name, self.dir.status()?))
+        Ok((self.config()?.name, self.dir.status()?))
     }
 
     /// Creates a room with `label` and this session as its only member.
