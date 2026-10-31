@@ -44,4 +44,4 @@ jobs:
           VERSION: ${{ steps.check.outputs.version }}
         run: |
           gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
-            noise-x86_64-linux noise-x86_64-linux.sha256
+            noise-x86_64-linux noise-x86_64-linux.sha256 crates/noise/install.sh

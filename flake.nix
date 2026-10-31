@@ -247,6 +247,8 @@
         };
       });
 
+      homeManagerModules.default = import ./home-manager.nix self;
+
       # `nix fmt` = the same whole-tree treefmt the devShell runs,
       # self-contained (formatters on PATH without entering the shell).
       # rustfmt comes from the pinned toolchain, as in the devShell.
