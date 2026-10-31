@@ -4,10 +4,12 @@
 
 pub mod chunk;
 mod inbound;
+mod join;
 mod node;
 #[cfg(test)]
 mod tests;
 
+pub use join::{Admission, JOIN_ALPN, Redeemed, Token};
 pub use node::{NOT_A_MEMBER, NetEvent, Node, Session};
 
 /// Locks `mutex`. A thread that panicked while it held the lock leaves

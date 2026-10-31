@@ -38,6 +38,10 @@ pub enum Request {
     Send { room: String, text: String },
     /// Set the session's status and announce it in every room.
     SetStatus { status: String },
+    /// Return a new single-use ticket to a room.
+    Invite { room: String },
+    /// Join the room of a ticket.
+    Join { ticket: String },
 }
 
 /// The process's response to a request.
@@ -49,6 +53,8 @@ pub enum Response {
     Created { room: RoomId },
     Rooms { rooms: Vec<RoomInfo> },
     Sent { id: MessageId },
+    Ticket { ticket: String },
+    Joined { room: RoomId },
 }
 
 /// Sends `request` to the `noise watch` process at `socket` and returns

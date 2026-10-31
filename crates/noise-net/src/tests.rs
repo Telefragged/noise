@@ -1,6 +1,6 @@
 //! Tests over real iroh endpoints on the loopback interface. Each test
-//! awaits the one event that produces the state it checks: a neighbor
-//! event, or a message that a session received.
+//! awaits the one event that produces the state it checks: the return of
+//! a join, a neighbor event, or a message that a session received.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::Ipv4Addr;
@@ -10,7 +10,9 @@ use iroh::Endpoint;
 use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::{ConnectionError, presets};
 use iroh_gossip::Gossip;
-use noise_room::{Body, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified};
+use noise_room::{
+    Body, Member, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
+};
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
@@ -19,6 +21,7 @@ use super::*;
 struct TestSession {
     key: SecretKey,
     rooms: Mutex<HashMap<RoomId, (Room, BTreeSet<PublicKey>)>>,
+    tokens: Mutex<HashMap<Token, RoomId>>,
     received: mpsc::UnboundedSender<(RoomId, Verified)>,
 }
 
@@ -38,6 +41,7 @@ impl TestSession {
         let session = Self {
             key: key.clone(),
             rooms: Mutex::new(rooms),
+            tokens: Mutex::new(HashMap::new()),
             received: sender,
         };
         (Arc::new(session), receiver)
@@ -45,6 +49,10 @@ impl TestSession {
 
     fn room(&self, id: &RoomId) -> Room {
         self.rooms.lock().expect("lock")[id].0.clone()
+    }
+
+    fn has_member(&self, id: &RoomId, key: &PublicKey) -> bool {
+        self.rooms.lock().expect("lock")[id].1.contains(key)
     }
 
     fn seal(&self, id: &RoomId, body: Body) -> (Verified, Vec<u8>) {
@@ -74,6 +82,38 @@ impl Session for TestSession {
             status: String::new(),
         };
         Some(self.seal(room, body).1)
+    }
+
+    fn redeem(&self, token: &Token, peer: PublicKey) -> Result<Redeemed, String> {
+        let id = self
+            .tokens
+            .lock()
+            .expect("lock")
+            .remove(token)
+            .ok_or("the ticket was used")?;
+        let mut rooms = self.rooms.lock().expect("lock");
+        let (room, members) = rooms.get_mut(&id).expect("room");
+        members.insert(peer);
+        let admission = Admission {
+            label: room.label().into(),
+            secret: room.secret().clone(),
+            members: members
+                .iter()
+                .map(|key| Member {
+                    key: *key,
+                    name: String::new(),
+                    status: String::new(),
+                })
+                .collect(),
+        };
+        let (_, announcement) = room
+            .seal(&self.key, Body::Admit { key: peer }, Timestamp(0))
+            .expect("seal");
+        Ok(Redeemed {
+            room: id,
+            admission,
+            announcement,
+        })
     }
 }
 
@@ -219,4 +259,85 @@ async fn a_non_member_cannot_open_a_gossip_connection() {
     }
     node_a.shutdown().await;
     node_e.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ticket_admits_one_session_once() {
+    let (a, c, d) = (key(1), key(3), key(4));
+    let room = room();
+    let lookup = MemoryLookup::new();
+    let (at_a, _) = TestSession::new(&a, &[(&room, &[&a])]);
+    at_a.tokens.lock().expect("lock").insert([9; 16], room.id());
+    let node_a = node(&lookup, &a, Arc::clone(&at_a)).await;
+    let node_c = node(&lookup, &c, TestSession::new(&c, &[]).0).await;
+    let node_d = node(&lookup, &d, TestSession::new(&d, &[]).0).await;
+
+    let admission = node_c
+        .join(node_a.endpoint().addr(), [9; 16])
+        .await
+        .expect("join");
+    assert_eq!(admission.secret, *room.secret());
+    assert_eq!(admission.label, "ci");
+    assert!(
+        admission
+            .members
+            .iter()
+            .any(|member| member.key == a.public())
+    );
+    assert!(at_a.has_member(&room.id(), &c.public()));
+
+    let again = node_d.join(node_a.endpoint().addr(), [9; 16]).await;
+    assert!(
+        again
+            .expect_err("an error")
+            .to_string()
+            .contains("the ticket was used")
+    );
+    assert!(!at_a.has_member(&room.id(), &d.public()));
+    for node in [node_a, node_c, node_d] {
+        node.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joined_session_announces_itself_to_the_room() {
+    let (a, c) = (key(1), key(3));
+    let room = room();
+    let lookup = MemoryLookup::new();
+    let (at_a, mut received_a) = TestSession::new(&a, &[(&room, &[&a])]);
+    at_a.tokens.lock().expect("lock").insert([9; 16], room.id());
+    let node_a = node(&lookup, &a, Arc::clone(&at_a)).await;
+    drop(
+        node_a
+            .open_room(room.clone(), Vec::new())
+            .await
+            .expect("open room"),
+    );
+    let (at_c, _) = TestSession::new(&c, &[]);
+    let node_c = node(&lookup, &c, Arc::clone(&at_c)).await;
+
+    let admission = node_c
+        .join(node_a.endpoint().addr(), [9; 16])
+        .await
+        .expect("join");
+    let joined = Room::new(admission.label, admission.secret);
+    at_c.rooms.lock().expect("lock").insert(
+        joined.id(),
+        (
+            joined.clone(),
+            admission.members.iter().map(|member| member.key).collect(),
+        ),
+    );
+    let bootstrap = admission.members.iter().map(|member| member.key).collect();
+    let first_neighbor = node_c
+        .open_room(joined, bootstrap)
+        .await
+        .expect("open room");
+    first_neighbor.await.expect("first neighbor");
+    received_from(&mut received_a, c.public(), |body| {
+        matches!(body, Body::Profile { .. })
+    })
+    .await;
+    node_a.shutdown().await;
+    node_c.shutdown().await;
 }

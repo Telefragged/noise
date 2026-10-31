@@ -15,7 +15,9 @@ iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 n0-future = { workspace = true }
 noise-room = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+postcard = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = [

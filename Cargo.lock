@@ -2031,11 +2031,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "data-encoding",
  "iroh",
  "iroh-gossip",
  "noise-net",
  "noise-room",
  "noise-store",
+ "postcard",
  "rand",
  "rustix",
  "serde",
@@ -2056,6 +2058,8 @@ dependencies = [
  "iroh-gossip",
  "n0-future",
  "noise-room",
+ "postcard",
+ "serde",
  "tokio",
 ]
 
