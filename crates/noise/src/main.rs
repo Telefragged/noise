@@ -4,6 +4,7 @@ mod dirs;
 mod inbox;
 mod parent;
 mod state;
+mod status;
 mod ticket;
 mod watch;
 mod watch_socket;
@@ -31,8 +32,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print a session's `EndpointId`, the key that identifies it in
-    /// rooms.
+    /// Print a session's `EndpointId`, the key that identifies it in rooms
+    /// and in `noise status`.
     ///
     /// Without a session id, it prints the current session's key and
     /// creates the key when the session has none.
@@ -54,6 +55,17 @@ enum Command {
     /// Set the current session's status, the second part of its display
     /// name, and announce it in every room.
     SetStatus { status: String },
+    /// Print a session's peers and their connections: the path of each
+    /// connection, direct or through a relay, and the bytes sent and
+    /// received. One JSON array of peers per line.
+    Status {
+        /// The session id (default: `$CLAUDE_CODE_SESSION_ID`).
+        session: Option<String>,
+        /// Print a new line at each change, and every second, until
+        /// interrupted.
+        #[arg(long)]
+        follow: bool,
+    },
     /// Run the process that connects the current session to its rooms.
     ///
     /// The plugin's `SessionStart` hook starts it. It returns at once when
@@ -107,6 +119,7 @@ fn main() -> Result<()> {
             print(&Request::Send { room, text })
         }
         Command::SetStatus { status } => print(&Request::SetStatus { status }),
+        Command::Status { session, follow } => status(session, follow),
         Command::Watch { stop: false } => watch::run(&current_session_dir()?),
         // A session without a running process has nothing to stop.
         Command::Watch { stop: true } => request(&Request::Stop).map(|_| ()),
@@ -137,6 +150,34 @@ fn print(request: &Request) -> Result<()> {
                 println!("{}", serde_json::to_string(&room)?);
             }
         }
+        Response::Status { peers } => println!("{}", serde_json::to_string(&peers)?),
+    }
+    Ok(())
+}
+
+/// Prints the status of the session `session`, or of the current one.
+fn status(session: Option<String>, follow: bool) -> Result<()> {
+    let dir = match session {
+        Some(id) => session_dir(&id)?,
+        None => current_session_dir()?,
+    };
+    let mut failed = None;
+    let answered = watch::stream(&dir, &Request::Status { follow }, |response| {
+        match response {
+            Response::Status { peers } => match serde_json::to_string(&peers) {
+                Ok(line) => println!("{line}"),
+                Err(err) => failed = Some(err.into()),
+            },
+            Response::Error { message } => failed = Some(anyhow!("{message}")),
+            other => failed = Some(anyhow!("unexpected response: {other:?}")),
+        }
+        failed.is_none() && follow
+    })?;
+    if let Some(err) = failed {
+        return Err(err);
+    }
+    if !answered {
+        bail!("no noise watch process runs for that session");
     }
     Ok(())
 }

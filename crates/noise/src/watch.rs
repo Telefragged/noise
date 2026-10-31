@@ -17,6 +17,7 @@ use iroh::Endpoint;
 use iroh::endpoint::{Builder, presets};
 use iroh_gossip::Gossip;
 use noise_net::Node;
+use noise_net::status::{Connections, by_peer};
 use noise_room::Body;
 use noise_store::SessionDir;
 use tokio::sync::{OnceCell, mpsc};
@@ -26,8 +27,9 @@ use crate::delivery::{Arrival, Delivery};
 use crate::inbox::Inbox;
 use crate::parent::exit_with_parent;
 use crate::state::SessionState;
+use crate::status::{follow, peer_info};
 use crate::ticket::Ticket;
-use crate::watch_socket::{self, Request, Response, SOCKET_FILE};
+use crate::watch_socket::{self, Replies, Request, Response, SOCKET_FILE, one};
 
 /// The lock file that keeps one `noise watch` process per session.
 /// `SessionStart` hooks run again after compaction, with the same id.
@@ -37,7 +39,8 @@ const LOCK_FILE: &str = "watch.lock";
 /// that a message sent right after the join reaches the room.
 const JOIN_WAIT: Duration = Duration::from_secs(10);
 
-/// The builder of the session's endpoint, before the session's key.
+/// The builder of the session's endpoint, before the session's key and
+/// the hook that records its connections.
 type Bind = fn() -> Result<Builder>;
 
 /// Runs the `noise watch` process of the session in `dir`. Returns at once
@@ -77,6 +80,24 @@ pub fn call(dir: &SessionDir, request: &Request) -> Result<Option<Response>> {
     runtime.block_on(watch_socket::call(Path::new(SOCKET_FILE), request))
 }
 
+/// Sends `request` to the `noise watch` process of the session in `dir`
+/// and passes each response to `each`, until `each` returns `false` or the
+/// process ends the stream. Returns `false` when no process runs.
+///
+/// # Errors
+///
+/// When the socket breaks the protocol.
+pub fn stream(
+    dir: &SessionDir,
+    request: &Request,
+    each: impl FnMut(Response) -> bool,
+) -> Result<bool> {
+    let Some(runtime) = enter(dir)? else {
+        return Ok(false);
+    };
+    runtime.block_on(watch_socket::follow(Path::new(SOCKET_FILE), request, each))
+}
+
 /// Enters the session's state directory, where the socket's relative path
 /// points, and builds a runtime for one request. `None` when the directory
 /// does not exist: no process ran for the session.
@@ -97,6 +118,7 @@ struct Watch {
     state: Arc<SessionState>,
     node: OnceCell<Node<SessionState>>,
     bind: Bind,
+    connections: Connections,
 }
 
 impl Watch {
@@ -107,6 +129,7 @@ impl Watch {
             .get_or_try_init(|| async {
                 let endpoint = (self.bind)()?
                     .secret_key(self.state.key().clone())
+                    .hooks(self.connections.clone())
                     .bind()
                     .await?;
                 anyhow::Ok(Node::spawn(
@@ -118,13 +141,32 @@ impl Watch {
             .await
     }
 
-    async fn handle(&self, request: Request) -> Response {
-        match self.answer(request).await {
+    async fn handle(self: &Arc<Self>, request: Request) -> Replies {
+        if let Request::Status { follow: true } = request {
+            let (sender, replies) = mpsc::channel(1);
+            let watch = Arc::clone(self);
+            let changes = self.connections.changes();
+            tokio::spawn(async move { follow(move || watch.status(), changes, sender).await });
+            return replies;
+        }
+        one(match self.answer(request).await {
             Ok(response) => response,
             Err(err) => Response::Error {
                 message: format!("{err:#}"),
             },
-        }
+        })
+    }
+
+    /// The session's peers and their connections.
+    fn status(&self) -> Response {
+        let peers = by_peer(self.connections.snapshot())
+            .into_iter()
+            .map(|status| {
+                let (name, rooms) = self.state.describe(&status.peer);
+                peer_info(&status, name, rooms)
+            })
+            .collect();
+        Response::Status { peers }
     }
 
     async fn answer(&self, request: Request) -> Result<Response> {
@@ -195,6 +237,7 @@ impl Watch {
                 state.remove(&room)?;
                 Response::Ok
             }
+            Request::Status { .. } => self.status(),
         })
     }
 }
@@ -234,6 +277,7 @@ async fn start(
         state: Arc::clone(&state),
         node: OnceCell::new(),
         bind,
+        connections: Connections::default(),
     };
     let rooms = state.rooms();
     if !rooms.is_empty() {
@@ -335,8 +379,9 @@ mod tests {
         (Arc::new(watch), received)
     }
 
+    /// The single reply to `request`.
     async fn reply(watch: &Arc<Watch>, request: Request) -> Response {
-        watch.handle(request).await
+        watch.handle(request).await.recv().await.expect("receive")
     }
 
     /// Shuts the watch's node down before the test's runtime ends.

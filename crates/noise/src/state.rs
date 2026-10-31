@@ -276,6 +276,27 @@ impl SessionState {
         Ok(token)
     }
 
+    /// `peer`'s display name in the rooms that it shares with the session,
+    /// and the labels of those rooms.
+    #[must_use]
+    pub fn describe(&self, peer: &PublicKey) -> (String, Vec<String>) {
+        let rooms = self.lock();
+        let shared: Vec<&RoomMembers> = rooms
+            .values()
+            .filter(|entry| entry.members.contains_key(peer))
+            .collect();
+        let name = shared
+            .iter()
+            .map(|entry| entry.name_of(peer))
+            .find(|name| !name.is_empty())
+            .unwrap_or_default();
+        let labels = shared
+            .iter()
+            .map(|entry| entry.room.label().to_owned())
+            .collect();
+        (name, labels)
+    }
+
     /// The session's rooms and their members.
     #[must_use]
     pub fn list(&self) -> Vec<RoomInfo> {

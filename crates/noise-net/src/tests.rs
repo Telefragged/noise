@@ -16,6 +16,7 @@ use noise_room::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
+use crate::status::{Connections, Paths, by_peer};
 
 /// A session's rooms and their members, in memory.
 struct TestSession {
@@ -131,8 +132,19 @@ async fn node(
     key: &SecretKey,
     session: Arc<TestSession>,
 ) -> Node<TestSession> {
+    node_with(lookup, key, session, Connections::default()).await
+}
+
+/// A node that records its connections in `connections`.
+async fn node_with(
+    lookup: &MemoryLookup,
+    key: &SecretKey,
+    session: Arc<TestSession>,
+    connections: Connections,
+) -> Node<TestSession> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key.clone())
+        .hooks(connections)
         .address_lookup(lookup.clone())
         .clear_ip_transports()
         .bind_addr((Ipv4Addr::LOCALHOST, 0))
@@ -340,4 +352,43 @@ async fn a_joined_session_announces_itself_to_the_room() {
     .await;
     node_a.shutdown().await;
     node_c.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn both_sides_report_a_gossip_connection_with_its_path_and_bytes() {
+    let (a, b) = (key(1), key(2));
+    let (room, members) = (room(), [&a, &b]);
+    let lookup = MemoryLookup::new();
+    let (at_a, at_b) = (Connections::default(), Connections::default());
+    let session_a = TestSession::new(&a, &[(&room, &members)]).0;
+    let session_b = TestSession::new(&b, &[(&room, &members)]).0;
+    let node_a = node_with(&lookup, &a, session_a, at_a.clone()).await;
+    let node_b = node_with(&lookup, &b, session_b, at_b.clone()).await;
+    let (mut events_a, mut events_b) = (node_a.events(), node_b.events());
+    drop(
+        node_a
+            .open_room(room.clone(), Vec::new())
+            .await
+            .expect("open room"),
+    );
+    drop(
+        node_b
+            .open_room(room.clone(), vec![a.public()])
+            .await
+            .expect("open room"),
+    );
+    // The hook runs in the handshake, before either side's gossip.
+    neighbor_up(&mut events_a, b.public()).await;
+    neighbor_up(&mut events_b, a.public()).await;
+
+    for (connections, peer) in [(&at_b, a.public()), (&at_a, b.public())] {
+        let peers = by_peer(connections.snapshot());
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer, peer);
+        assert_eq!(peers[0].paths, Paths::Direct);
+        assert!(peers[0].sent > 0 && peers[0].received > 0);
+        assert_eq!(peers[0].connections[0].alpn, iroh_gossip::ALPN);
+    }
+    node_a.shutdown().await;
+    node_b.shutdown().await;
 }
