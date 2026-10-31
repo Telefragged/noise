@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use noise_net::Session;
-use noise_room::{Body, Member, PublicKey, Room, RoomId, SecretKey, Timestamp, Verified};
+use noise_room::{
+    Body, Member, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
+};
 use noise_store::{RoomRecord, SessionDir};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -70,6 +73,14 @@ impl RoomMembers {
     }
 }
 
+/// A room, as `noise room list` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInfo {
+    pub id: RoomId,
+    pub label: String,
+    pub members: Vec<Member>,
+}
+
 impl SessionState {
     /// Opens the session's key and rooms. `config` is the path of the
     /// config with the session's name. The state sends what happens in its
@@ -121,6 +132,42 @@ impl SessionState {
         Ok((Config::read(&self.config)?.name, self.dir.status()?))
     }
 
+    /// Creates a room with `label` and this session as its only member.
+    ///
+    /// # Errors
+    ///
+    /// When the config or the rooms file fails.
+    pub fn create(&self, label: String) -> Result<Room> {
+        let room = Room::new(label, RoomSecret::from_bytes(rand::random()));
+        let me = self.me()?;
+        self.insert(room.clone(), vec![me])?;
+        Ok(room)
+    }
+
+    /// The room that `room` names: a room id, or a label that exactly one
+    /// of the session's rooms has.
+    ///
+    /// # Errors
+    ///
+    /// When no room, or more than one, matches.
+    pub fn resolve(&self, room: &str) -> Result<RoomId> {
+        let rooms = self.lock();
+        if let Ok(id) = room.parse::<RoomId>()
+            && rooms.contains_key(&id)
+        {
+            return Ok(id);
+        }
+        let mut matching = rooms
+            .values()
+            .map(|entry| &entry.room)
+            .filter(|stored| stored.label() == room);
+        match (matching.next(), matching.next()) {
+            (Some(found), None) => Ok(found.id()),
+            (None, _) => bail!("the session has no room {room:?}"),
+            (Some(_), Some(_)) => bail!("more than one room has the label {room:?}; use its id"),
+        }
+    }
+
     /// Signs a message of this session with `body` and seals it for
     /// `room`. Returns the message and the sealed bytes to send.
     ///
@@ -135,6 +182,23 @@ impl SessionState {
         Ok(entry.room.seal(&self.key, body, now())?)
     }
 
+    /// Replaces the session's status, and returns the session's rooms, in
+    /// which to announce it.
+    ///
+    /// # Errors
+    ///
+    /// When the status file or the rooms file cannot be written.
+    pub fn set_status(&self, status: &str) -> Result<Vec<RoomId>> {
+        self.dir.set_status(status)?;
+        let me = self.me()?;
+        let mut rooms = self.lock();
+        for entry in rooms.values_mut() {
+            entry.update(me.key, &me.name, &me.status);
+        }
+        self.save(&rooms)?;
+        Ok(rooms.keys().copied().collect())
+    }
+
     /// The session's rooms, each with its other members, the peers to join
     /// its topic through.
     #[must_use]
@@ -147,6 +211,38 @@ impl SessionState {
                 (entry.room.clone(), peers.collect())
             })
             .collect()
+    }
+
+    /// The session's rooms and their members.
+    #[must_use]
+    pub fn list(&self) -> Vec<RoomInfo> {
+        self.lock()
+            .values()
+            .map(|entry| RoomInfo {
+                id: entry.room.id(),
+                label: entry.room.label().to_owned(),
+                members: entry.members.values().cloned().collect(),
+            })
+            .collect()
+    }
+
+    fn me(&self) -> Result<Member> {
+        let (name, status) = self.name_and_status()?;
+        Ok(Member {
+            key: self.key.public(),
+            name,
+            status,
+        })
+    }
+
+    fn insert(&self, room: Room, members: Vec<Member>) -> Result<()> {
+        let members = members
+            .into_iter()
+            .map(|member| (member.key, member))
+            .collect();
+        let mut rooms = self.lock();
+        rooms.insert(room.id(), RoomMembers { room, members });
+        self.save(&rooms)
     }
 
     fn save(&self, rooms: &BTreeMap<RoomId, RoomMembers>) -> Result<()> {
@@ -251,8 +347,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use noise_room::RoomSecret;
-
     use super::*;
 
     struct Fixture {

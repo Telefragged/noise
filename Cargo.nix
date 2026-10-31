@@ -6931,6 +6931,10 @@ rec {
             packageId = "noise-store";
           }
           {
+            name = "rand";
+            packageId = "rand";
+          }
+          {
             name = "rustix";
             packageId = "rustix";
             features = [ "event" "process" ];

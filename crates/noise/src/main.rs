@@ -7,6 +7,7 @@ mod state;
 mod watch;
 mod watch_socket;
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
@@ -38,6 +39,19 @@ enum Command {
         /// The session id (default: `$CLAUDE_CODE_SESSION_ID`).
         session: Option<String>,
     },
+    /// Create and list the current session's rooms.
+    #[command(subcommand)]
+    Room(RoomCommand),
+    /// Send a chat message to a room.
+    Send {
+        /// The room: its id, or a label that one room has.
+        room: String,
+        /// The message (default: standard input).
+        text: Option<String>,
+    },
+    /// Set the current session's status, the second part of its display
+    /// name, and announce it in every room.
+    SetStatus { status: String },
     /// Run the process that connects the current session to its rooms.
     ///
     /// The plugin's `SessionStart` hook starts it. It returns at once when
@@ -49,22 +63,62 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum RoomCommand {
+    /// Create a room and print its id.
+    Create { label: String },
+    /// Print the session's rooms and their members, one JSON object per
+    /// line.
+    List,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Key { session } => key(session),
+        Command::Room(RoomCommand::Create { label }) => print(&Request::Create { label }),
+        Command::Room(RoomCommand::List) => print(&Request::List),
+        Command::Send { room, text } => {
+            let text = if let Some(text) = text {
+                text
+            } else {
+                let mut text = String::new();
+                std::io::stdin().read_to_string(&mut text)?;
+                text
+            };
+            print(&Request::Send { room, text })
+        }
+        Command::SetStatus { status } => print(&Request::SetStatus { status }),
         Command::Watch { stop: false } => watch::run(&current_session_dir()?),
+        // A session without a running process has nothing to stop.
         Command::Watch { stop: true } => request(&Request::Stop).map(|_| ()),
     }
 }
 
 /// Sends `request` to the current session's `noise watch` process.
-/// Returns `false` when no process runs.
-fn request(request: &Request) -> Result<bool> {
+/// `None` when no process runs.
+fn request(request: &Request) -> Result<Option<Response>> {
     match watch::call(&current_session_dir()?, request)? {
-        None => Ok(false),
-        Some(Response::Ok) => Ok(true),
         Some(Response::Error { message }) => bail!("{message}"),
+        response => Ok(response),
     }
+}
+
+/// Sends `request` to the current session's `noise watch` process and
+/// prints the result.
+fn print(request: &Request) -> Result<()> {
+    let response = self::request(request)?
+        .ok_or_else(|| anyhow!("no noise watch process runs for this session"))?;
+    match response {
+        Response::Ok | Response::Error { .. } => {}
+        Response::Created { room } => println!("{room}"),
+        Response::Sent { id } => println!("{id}"),
+        Response::Rooms { rooms } => {
+            for room in rooms {
+                println!("{}", serde_json::to_string(&room)?);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn current_session_dir() -> Result<SessionDir> {

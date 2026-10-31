@@ -17,6 +17,7 @@ use iroh::Endpoint;
 use iroh::endpoint::{Builder, presets};
 use iroh_gossip::Gossip;
 use noise_net::Node;
+use noise_room::Body;
 use noise_store::SessionDir;
 use tokio::sync::{OnceCell, mpsc};
 
@@ -112,15 +113,51 @@ impl Watch {
             .await
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "the only request, `Stop`, reads no state"
-    )]
-    fn handle(&self, request: &Request) -> Response {
-        match request {
+    async fn handle(&self, request: Request) -> Response {
+        match self.answer(request).await {
+            Ok(response) => response,
+            Err(err) => Response::Error {
+                message: format!("{err:#}"),
+            },
+        }
+    }
+
+    async fn answer(&self, request: Request) -> Result<Response> {
+        let state = &self.state;
+        Ok(match request {
             // `serve` returns after this response, and the process ends.
             Request::Stop => Response::Ok,
-        }
+            Request::Create { label } => {
+                let room = state.create(label)?;
+                let id = room.id();
+                // A new room has no other member to wait for.
+                drop(self.node().await?.open_room(room, Vec::new()).await?);
+                Response::Created { room: id }
+            }
+            Request::List => Response::Rooms {
+                rooms: state.list(),
+            },
+            Request::Send { room, text } => {
+                let room = state.resolve(&room)?;
+                let (name, status) = state.name_and_status()?;
+                let body = Body::Text { text, name, status };
+                let (message, sealed) = state.seal(&room, body)?;
+                self.node().await?.send(&room, &sealed).await?;
+                Response::Sent { id: message.id() }
+            }
+            Request::SetStatus { status } => {
+                let name = state.name_and_status()?.0;
+                for room in state.set_status(&status)? {
+                    let body = Body::Profile {
+                        name: name.clone(),
+                        status: status.clone(),
+                    };
+                    let (_, sealed) = state.seal(&room, body)?;
+                    self.node().await?.send(&room, &sealed).await?;
+                }
+                Response::Ok
+            }
+        })
     }
 }
 
@@ -140,7 +177,7 @@ async fn serve(dir: &SessionDir, inbox: Inbox, config: PathBuf) -> Result<()> {
     let listener = watch_socket::bind(Path::new(SOCKET_FILE))?;
     watch_socket::serve(listener, move |request| {
         let watch = Arc::clone(&watch);
-        async move { watch.handle(&request) }
+        async move { watch.handle(request).await }
     })
     .await;
     Ok(())
@@ -220,6 +257,10 @@ fn lock(path: &Path) -> Result<Option<File>> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
+    use noise_room::RoomId;
+
     use super::*;
 
     #[test]
@@ -231,5 +272,114 @@ mod tests {
         assert!(lock(&path).expect("lock").is_none());
         drop(held);
         assert!(lock(&path).expect("lock").is_some());
+    }
+
+    /// An endpoint on the loopback interface, without relays or address
+    /// lookup.
+    fn bind_loopback() -> Result<Builder> {
+        Ok(Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))?)
+    }
+
+    /// A `Watch` for a new session, with `name` in its config, and the
+    /// receiver of what happens in its rooms.
+    async fn watch(root: &Path, name: &str) -> (Arc<Watch>, mpsc::UnboundedReceiver<Arrival>) {
+        let config = root.join("config.toml");
+        std::fs::write(&config, format!("name = {name:?}\n")).expect("write");
+        let dir = SessionDir::new(root, "s1");
+        let (arrivals, received) = mpsc::unbounded_channel();
+        let watch = start(&dir, bind_loopback, config, arrivals)
+            .await
+            .expect("start");
+        (Arc::new(watch), received)
+    }
+
+    async fn reply(watch: &Arc<Watch>, request: Request) -> Response {
+        watch.handle(request).await
+    }
+
+    /// Shuts the watch's node down before the test's runtime ends.
+    async fn stop(watch: &Arc<Watch>) {
+        if let Some(node) = watch.node.get() {
+            node.shutdown().await;
+        }
+    }
+
+    async fn create(watch: &Arc<Watch>, label: &str) -> RoomId {
+        let created = reply(
+            watch,
+            Request::Create {
+                label: label.into(),
+            },
+        )
+        .await;
+        let Response::Created { room } = created else {
+            panic!("expected a created room, got {created:?}");
+        };
+        room
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_created_room_takes_messages_by_label_or_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (watch, _) = watch(dir.path(), "vetle").await;
+        let room = create(&watch, "ci").await;
+        let Response::Rooms { rooms } = reply(&watch, Request::List).await else {
+            panic!("expected rooms");
+        };
+        assert_eq!(rooms.len(), 1);
+        assert_eq!((rooms[0].id, rooms[0].label.as_str()), (room, "ci"));
+        assert_eq!(rooms[0].members.len(), 1);
+        assert_eq!(rooms[0].members[0].name, "vetle");
+
+        for name in ["ci".to_owned(), room.to_string()] {
+            let sent = reply(
+                &watch,
+                Request::Send {
+                    room: name,
+                    text: "hello".into(),
+                },
+            )
+            .await;
+            assert!(matches!(sent, Response::Sent { .. }), "{sent:?}");
+        }
+        stop(&watch).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_status_shows_in_the_member_list() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (watch, _) = watch(root.path(), "vetle").await;
+        create(&watch, "ci").await;
+        let set = reply(
+            &watch,
+            Request::SetStatus {
+                status: "CI optimization".into(),
+            },
+        )
+        .await;
+        assert_eq!(set, Response::Ok);
+        let Response::Rooms { rooms } = reply(&watch, Request::List).await else {
+            panic!("expected rooms");
+        };
+        assert_eq!(rooms[0].members[0].status, "CI optimization");
+        stop(&watch).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_room_is_an_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (watch, _) = watch(root.path(), "vetle").await;
+        let response = reply(
+            &watch,
+            Request::Send {
+                room: "nowhere".into(),
+                text: "hi".into(),
+            },
+        )
+        .await;
+        assert!(matches!(response, Response::Error { .. }), "{response:?}");
+        stop(&watch).await;
     }
 }
