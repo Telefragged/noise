@@ -12,10 +12,13 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use noise_room::{MessageId, RoomId};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+
+use crate::state::RoomInfo;
 
 /// The socket's file name in the session's state directory.
 pub const SOCKET_FILE: &str = "watch.sock";
@@ -27,6 +30,14 @@ pub enum Request {
     /// End the process. [`serve`] returns once the `Ok` response is
     /// written.
     Stop,
+    /// Create a room.
+    Create { label: String },
+    /// List the session's rooms.
+    List,
+    /// Send a chat message to a room. `room` is a room id or a label.
+    Send { room: String, text: String },
+    /// Set the session's status and announce it in every room.
+    SetStatus { status: String },
 }
 
 /// The process's response to a request.
@@ -35,6 +46,9 @@ pub enum Request {
 pub enum Response {
     Ok,
     Error { message: String },
+    Created { room: RoomId },
+    Rooms { rooms: Vec<RoomInfo> },
+    Sent { id: MessageId },
 }
 
 /// Sends `request` to the `noise watch` process at `socket` and returns
@@ -137,34 +151,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
 
     #[tokio::test]
     async fn a_request_gets_the_handlers_response_and_a_stop_ends_the_loop() {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join(SOCKET_FILE);
-        assert_eq!(call(&socket, &Request::Stop).await.expect("call"), None);
+        assert_eq!(call(&socket, &Request::List).await.expect("call"), None);
 
         let listener = bind(&socket).expect("bind");
-        let refused = Arc::new(AtomicBool::new(false));
-        let serving = tokio::spawn(serve(listener, move |_| {
-            let refused = Arc::clone(&refused);
-            async move {
-                // The first stop gets an error, which keeps the loop.
-                if refused.swap(true, Ordering::SeqCst) {
-                    Response::Ok
-                } else {
-                    Response::Error {
-                        message: "not now".into(),
-                    }
-                }
+        let serving = tokio::spawn(serve(listener, |request| async move {
+            match request {
+                Request::Stop => Response::Ok,
+                _ => Response::Error {
+                    message: "not now".into(),
+                },
             }
         }));
         assert_eq!(
-            call(&socket, &Request::Stop).await.expect("call"),
+            call(&socket, &Request::List).await.expect("call"),
             Some(Response::Error {
                 message: "not now".into()
             })
