@@ -2038,6 +2038,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "noise-net"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "noise-room",
+]
+
+[[package]]
 name = "noise-room"
 version = "0.1.0"
 dependencies = [

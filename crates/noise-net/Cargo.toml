@@ -1,0 +1,12 @@
+[package]
+name = "noise-net"
+version.workspace = true
+edition.workspace = true
+description = "The iroh layer of noise: gossip, chunks, joins, and admission"
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+noise-room = { workspace = true }

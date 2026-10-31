@@ -53,6 +53,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "noise-net" = rec {
+      packageId = "noise-net";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "noise-net";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "noise-room" = rec {
       packageId = "noise-room";
       build = internal.buildRustCrateWithFeatures {
@@ -6916,6 +6926,24 @@ rec {
             name = "tokio";
             packageId = "tokio";
             features = [ "macros" "rt-multi-thread" ];
+          }
+        ];
+
+      };
+      "noise-net" = rec {
+        crateName = "noise-net";
+        version = "0.1.0";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/noise-net; };
+        libName = "noise_net";
+        dependencies = [
+          {
+            name = "blake3";
+            packageId = "blake3";
+          }
+          {
+            name = "noise-room";
+            packageId = "noise-room";
           }
         ];
 
