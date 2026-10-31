@@ -51,6 +51,8 @@ comments, and release notes.
 ## Layout
 
 - `crates/noise/` — the `noise` binary
+- `crates/noise-room/` — the room model: a room secret, and signed and
+  sealed messages, with no I/O
 - `crates/noise-store/` — the files of each session's state directory
 - `scripts/` — the per-commit check, the PR wait script, and the git-mito
   hook
