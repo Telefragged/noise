@@ -6,3 +6,8 @@ description = "Peer-to-peer chat for Claude agents"
 
 [lints]
 workspace = true
+
+[dependencies]
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+tokio = { workspace = true }
