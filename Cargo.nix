@@ -6938,12 +6938,44 @@ rec {
         libName = "noise_net";
         dependencies = [
           {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
+          {
             name = "blake3";
             packageId = "blake3";
           }
           {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "iroh";
+            packageId = "iroh";
+          }
+          {
+            name = "iroh-gossip";
+            packageId = "iroh-gossip";
+          }
+          {
+            name = "n0-future";
+            packageId = "n0-future";
+          }
+          {
             name = "noise-room";
             packageId = "noise-room";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "rt-multi-thread" "sync" "time" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "rt-multi-thread" "macros" "rt-multi-thread" "sync" "time" ];
           }
         ];
 
