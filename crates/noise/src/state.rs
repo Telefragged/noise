@@ -1,0 +1,410 @@
+//! The session's rooms and their members, as the node and the CLI use
+//! them.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow};
+use noise_net::Session;
+use noise_room::{Body, Member, PublicKey, Room, RoomId, SecretKey, Timestamp, Verified};
+use noise_store::{RoomRecord, SessionDir};
+use tokio::sync::mpsc;
+
+use crate::config::Config;
+use crate::delivery::{Arrival, RoomRef, Shown, display_name};
+
+/// The rooms of one session and their members. Each change to a room or
+/// its members reaches the session's rooms file before the call returns.
+pub struct SessionState {
+    key: SecretKey,
+    dir: SessionDir,
+    config: PathBuf,
+    rooms: Mutex<BTreeMap<RoomId, RoomMembers>>,
+    arrivals: mpsc::UnboundedSender<Arrival>,
+}
+
+/// A room and its members, by key.
+struct RoomMembers {
+    room: Room,
+    members: BTreeMap<PublicKey, Member>,
+}
+
+impl RoomMembers {
+    /// Records `name` and `status` for `key`, which wrote a message.
+    /// Returns whether that changed the members.
+    fn update(&mut self, key: PublicKey, name: &str, status: &str) -> bool {
+        let member = Member {
+            key,
+            name: name.to_owned(),
+            status: status.to_owned(),
+        };
+        self.members.insert(key, member.clone()) != Some(member)
+    }
+
+    /// Adds `key` without a name, unless it is a member already. Returns
+    /// whether that changed the members.
+    fn add(&mut self, key: PublicKey) -> bool {
+        let new = !self.members.contains_key(&key);
+        self.members.entry(key).or_insert_with(|| Member {
+            key,
+            name: String::new(),
+            status: String::new(),
+        });
+        new
+    }
+
+    fn name_of(&self, key: &PublicKey) -> String {
+        self.members
+            .get(key)
+            .map(|member| display_name(&member.name, &member.status))
+            .unwrap_or_default()
+    }
+
+    fn room_ref(&self) -> RoomRef {
+        RoomRef {
+            id: self.room.id(),
+            label: self.room.label().to_owned(),
+        }
+    }
+}
+
+impl SessionState {
+    /// Opens the session's key and rooms. `config` is the path of the
+    /// config with the session's name. The state sends what happens in its
+    /// rooms to `arrivals`.
+    ///
+    /// # Errors
+    ///
+    /// When the key or the rooms file cannot be read.
+    pub fn open(
+        dir: &SessionDir,
+        config: PathBuf,
+        arrivals: mpsc::UnboundedSender<Arrival>,
+    ) -> Result<Self> {
+        let key = dir.secret_key().context("read the session's key")?;
+        let rooms = dir
+            .rooms()
+            .context("read the session's rooms")?
+            .into_iter()
+            .map(|record| {
+                let room = Room::new(record.label, record.secret);
+                let members = record
+                    .members
+                    .into_iter()
+                    .map(|member| (member.key, member))
+                    .collect();
+                (room.id(), RoomMembers { room, members })
+            })
+            .collect();
+        Ok(Self {
+            key,
+            dir: dir.clone(),
+            config,
+            rooms: Mutex::new(rooms),
+            arrivals,
+        })
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &SecretKey {
+        &self.key
+    }
+
+    /// This session's name, from the config, and its status.
+    ///
+    /// # Errors
+    ///
+    /// When the config or the status file cannot be read.
+    pub fn name_and_status(&self) -> Result<(String, String)> {
+        Ok((Config::read(&self.config)?.name, self.dir.status()?))
+    }
+
+    /// Signs a message of this session with `body` and seals it for
+    /// `room`. Returns the message and the sealed bytes to send.
+    ///
+    /// # Errors
+    ///
+    /// When the session has no such room, or the message is too large.
+    pub fn seal(&self, room: &RoomId, body: Body) -> Result<(Verified, Vec<u8>)> {
+        let rooms = self.lock();
+        let entry = rooms
+            .get(room)
+            .ok_or_else(|| anyhow!("the session has no room {room}"))?;
+        Ok(entry.room.seal(&self.key, body, now())?)
+    }
+
+    /// The session's rooms, each with its other members, the peers to join
+    /// its topic through.
+    #[must_use]
+    pub fn rooms(&self) -> Vec<(Room, Vec<PublicKey>)> {
+        let me = self.key.public();
+        self.lock()
+            .values()
+            .map(|entry| {
+                let peers = entry.members.keys().copied().filter(|key| *key != me);
+                (entry.room.clone(), peers.collect())
+            })
+            .collect()
+    }
+
+    fn save(&self, rooms: &BTreeMap<RoomId, RoomMembers>) -> Result<()> {
+        let records: Vec<RoomRecord> = rooms
+            .values()
+            .map(|entry| RoomRecord {
+                label: entry.room.label().to_owned(),
+                secret: entry.room.secret().clone(),
+                members: entry.members.values().cloned().collect(),
+            })
+            .collect();
+        self.dir
+            .set_rooms(&records)
+            .context("write the session's rooms")
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<RoomId, RoomMembers>> {
+        lock(&self.rooms)
+    }
+}
+
+impl Session for SessionState {
+    fn admits(&self, peer: &PublicKey) -> bool {
+        self.lock()
+            .values()
+            .any(|entry| entry.members.contains_key(peer))
+    }
+
+    fn receive(&self, room: &RoomId, message: Verified) {
+        let me = self.key.public();
+        let author = message.message().author;
+        let mut rooms = self.lock();
+        let Some(entry) = rooms.get_mut(room) else {
+            return;
+        };
+        // Only a member has the room's key, so the author of a message
+        // that opened is a member.
+        let (changed, arrival) = match &message.message().body {
+            Body::Text { name, status, .. } => {
+                let changed = entry.update(author, name, status);
+                let arrival = Shown::of(&message).map(|message| Arrival::Text {
+                    room: entry.room_ref(),
+                    message,
+                });
+                (changed, arrival)
+            }
+            Body::Profile { name, status } => (entry.update(author, name, status), None),
+            Body::Admit { key } => {
+                let known = entry.add(author);
+                let new = entry.add(*key);
+                let arrival = (new && *key != me).then(|| Arrival::Joined {
+                    room: entry.room_ref(),
+                    key: *key,
+                    by: entry.name_of(&author),
+                });
+                (known || new, arrival)
+            }
+            Body::Leave => {
+                let name = entry.name_of(&author);
+                let left = entry.members.remove(&author).is_some();
+                let arrival = left.then(|| Arrival::Left {
+                    room: entry.room_ref(),
+                    key: author,
+                    name,
+                });
+                (left, arrival)
+            }
+            Body::Unknown => (entry.add(author), None),
+        };
+        if changed && let Err(err) = self.save(&rooms) {
+            eprintln!("noise: {err:#}");
+        }
+        drop(rooms);
+        if author != me
+            && let Some(arrival) = arrival
+        {
+            // A closed channel means the process is ending.
+            let _ = self.arrivals.send(arrival);
+        }
+    }
+
+    fn profile(&self, room: &RoomId) -> Option<Vec<u8>> {
+        let (name, status) = self.name_and_status().ok()?;
+        let (_, sealed) = self.seal(room, Body::Profile { name, status }).ok()?;
+        Some(sealed)
+    }
+}
+
+/// The current time as a message timestamp.
+pub fn now() -> Timestamp {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Timestamp(u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Locks `mutex`. A thread that panicked while it held the lock leaves
+/// data that every user here can still read, so the poison is ignored.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use noise_room::RoomSecret;
+
+    use super::*;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        state: SessionState,
+        arrivals: mpsc::UnboundedReceiver<Arrival>,
+        room: Room,
+    }
+
+    /// A session named "me" in one room, "ci", whose only member it is.
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "name = \"me\"\n").expect("write");
+        let session = SessionDir::new(dir.path(), "s1");
+        let room = Room::new("ci".into(), RoomSecret::from_bytes([1; 32]));
+        let me = Member {
+            key: session.secret_key().expect("key").public(),
+            name: "me".into(),
+            status: String::new(),
+        };
+        let record = RoomRecord {
+            label: "ci".into(),
+            secret: room.secret().clone(),
+            members: vec![me],
+        };
+        session.set_rooms(&[record]).expect("write rooms");
+        let (sender, arrivals) = mpsc::unbounded_channel();
+        let state = SessionState::open(&session, config, sender).expect("session state");
+        Fixture {
+            _dir: dir,
+            state,
+            arrivals,
+            room,
+        }
+    }
+
+    fn key(n: u8) -> SecretKey {
+        SecretKey::from_bytes(&[n; 32])
+    }
+
+    fn text(text: &str, name: &str) -> Body {
+        Body::Text {
+            text: text.into(),
+            name: name.into(),
+            status: String::new(),
+        }
+    }
+
+    /// `body` by `author`, sealed for `room` and opened again.
+    fn message(room: &Room, author: &SecretKey, body: Body) -> Verified {
+        let (_, sealed) = room.seal(author, body, Timestamp(5)).expect("seal");
+        room.open(&sealed).expect("open")
+    }
+
+    /// The display name of `key` in `room`, or `None` when it is no member.
+    fn member(state: &SessionState, room: &Room, key: &PublicKey) -> Option<String> {
+        let rooms = state.lock();
+        let entry = &rooms[&room.id()];
+        entry.members.contains_key(key).then(|| entry.name_of(key))
+    }
+
+    #[test]
+    fn a_room_and_its_members_survive_a_reopen() {
+        let fixture = fixture();
+        let other = key(7);
+        let id = fixture.room.id();
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, &other, text("hi", "peer")));
+        let (sender, _) = mpsc::unbounded_channel();
+        let reopened = SessionState::open(&fixture.state.dir, fixture.state.config.clone(), sender)
+            .expect("session state");
+        assert_eq!(reopened.rooms()[0].1, vec![other.public()]);
+        assert_eq!(
+            member(&reopened, &fixture.room, &other.public()),
+            Some("peer".into())
+        );
+    }
+
+    #[test]
+    fn a_text_posts_and_names_its_author() {
+        let mut fixture = fixture();
+        let other = key(7);
+        let id = fixture.room.id();
+        let sent = message(&fixture.room, &other, text("hi", "peer"));
+        fixture.state.receive(&id, sent.clone());
+        match fixture.arrivals.try_recv().expect("an arrival") {
+            Arrival::Text { message, room } => {
+                assert_eq!(message.id, sent.id());
+                assert_eq!(room.label, "ci");
+            }
+            other => panic!("expected a text, got {other:?}"),
+        }
+        assert_eq!(
+            member(&fixture.state, &fixture.room, &other.public()),
+            Some("peer".into())
+        );
+    }
+
+    #[test]
+    fn an_admission_adds_the_key_and_posts_who_admitted_it() {
+        let mut fixture = fixture();
+        let (other, newcomer) = (key(7), key(8));
+        let id = fixture.room.id();
+        let profile = Body::Profile {
+            name: "peer".into(),
+            status: String::new(),
+        };
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, &other, profile));
+        let admit = Body::Admit {
+            key: newcomer.public(),
+        };
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, &other, admit));
+        match fixture.arrivals.try_recv().expect("an arrival") {
+            Arrival::Joined { key, by, .. } => {
+                assert_eq!((key, by.as_str()), (newcomer.public(), "peer"));
+            }
+            other => panic!("expected a join, got {other:?}"),
+        }
+        assert!(fixture.state.admits(&newcomer.public()));
+    }
+
+    #[test]
+    fn a_leave_removes_the_member() {
+        let mut fixture = fixture();
+        let other = key(7);
+        let id = fixture.room.id();
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, &other, text("bye", "peer")));
+        fixture.arrivals.try_recv().expect("an arrival");
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, &other, Body::Leave));
+        assert!(matches!(
+            fixture.arrivals.try_recv().expect("an arrival"),
+            Arrival::Left { name, .. } if name == "peer"
+        ));
+        assert!(!fixture.state.admits(&other.public()));
+    }
+
+    #[test]
+    fn the_sessions_own_messages_are_not_posted() {
+        let mut fixture = fixture();
+        let id = fixture.room.id();
+        let (own, _) = fixture.state.seal(&id, text("mine", "me")).expect("seal");
+        fixture.state.receive(&id, own);
+        assert!(fixture.arrivals.try_recv().is_err());
+    }
+}

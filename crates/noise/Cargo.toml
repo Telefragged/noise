@@ -12,5 +12,14 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
+noise-net = { workspace = true }
+noise-room = { workspace = true }
 noise-store = { workspace = true }
-tokio = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
