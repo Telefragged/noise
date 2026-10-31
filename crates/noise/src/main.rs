@@ -40,7 +40,8 @@ enum Command {
         /// The session id (default: `$CLAUDE_CODE_SESSION_ID`).
         session: Option<String>,
     },
-    /// Create, list, invite to, and join the current session's rooms.
+    /// Create, list, invite to, join and leave the current session's
+    /// rooms.
     #[command(subcommand)]
     Room(RoomCommand),
     /// Send a chat message to a room.
@@ -80,6 +81,11 @@ enum RoomCommand {
     },
     /// Join a room with a ticket from one of its members.
     Join { ticket: String },
+    /// Leave a room. Joining it again takes a new ticket.
+    Leave {
+        /// The room: its id, or a label that one room has.
+        room: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -89,6 +95,7 @@ fn main() -> Result<()> {
         Command::Room(RoomCommand::List) => print(&Request::List),
         Command::Room(RoomCommand::Invite { room }) => print(&Request::Invite { room }),
         Command::Room(RoomCommand::Join { ticket }) => print(&Request::Join { ticket }),
+        Command::Room(RoomCommand::Leave { room }) => print(&Request::Leave { room }),
         Command::Send { room, text } => {
             let text = if let Some(text) = text {
                 text

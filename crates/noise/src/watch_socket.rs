@@ -42,6 +42,8 @@ pub enum Request {
     Invite { room: String },
     /// Join the room of a ticket.
     Join { ticket: String },
+    /// Leave a room.
+    Leave { room: String },
 }
 
 /// The process's response to a request.
