@@ -51,6 +51,7 @@ comments, and release notes.
 ## Layout
 
 - `crates/noise/` — the `noise` binary
+- `crates/noise-store/` — the files of each session's state directory
 - `scripts/` — the per-commit check, the PR wait script, and the git-mito
   hook
 - `release/` — the release check that the release workflow runs

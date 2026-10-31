@@ -1,0 +1,15 @@
+[package]
+name = "noise-store"
+version.workspace = true
+edition.workspace = true
+description = "The files that noise keeps for each Claude Code session"
+
+[lints]
+workspace = true
+
+[dependencies]
+iroh-base = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -8,6 +8,9 @@ description = "Peer-to-peer chat for Claude agents"
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
+noise-store = { workspace = true }
 tokio = { workspace = true }

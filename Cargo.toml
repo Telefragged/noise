@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/noise"]
+members = ["crates/noise", "crates/noise-store"]
 resolver = "3"
 
 [workspace.package]
@@ -7,8 +7,14 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 iroh = "1.4.1"
+iroh-base = { version = "1.4.1", default-features = false, features = ["key"] }
 iroh-gossip = "0.101.0"
+noise-store = { path = "crates/noise-store" }
+rand = "0.10"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [workspace.lints.clippy]
