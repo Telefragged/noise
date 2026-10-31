@@ -15,6 +15,7 @@ data-encoding = { workspace = true }
 include_dir = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
+iroh-mdns-address-lookup = { workspace = true }
 noise-net = { workspace = true }
 noise-room = { workspace = true }
 noise-store = { workspace = true }

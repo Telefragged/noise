@@ -27,6 +27,10 @@ Set the name that other sessions show for yours in
 name = "vetle"
 ```
 
+Sessions on one machine or one local network find each other with mDNS,
+which announces each session's key on the local network, so they need
+no relay. To turn it off, add `mdns = false` to the config.
+
 ## Use
 
 The plugin's skill documents the commands for the agent. To connect two
