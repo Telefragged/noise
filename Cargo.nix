@@ -6911,6 +6911,10 @@ rec {
             features = [ "derive" ];
           }
           {
+            name = "data-encoding";
+            packageId = "data-encoding";
+          }
+          {
             name = "iroh";
             packageId = "iroh";
           }
@@ -6929,6 +6933,11 @@ rec {
           {
             name = "noise-store";
             packageId = "noise-store";
+          }
+          {
+            name = "postcard";
+            packageId = "postcard";
+            features = [ "use-std" ];
           }
           {
             name = "rand";
@@ -7002,9 +7011,19 @@ rec {
             packageId = "noise-room";
           }
           {
+            name = "postcard";
+            packageId = "postcard";
+            features = [ "use-std" ];
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            features = [ "derive" ];
+          }
+          {
             name = "tokio";
             packageId = "tokio";
-            features = [ "macros" "rt-multi-thread" "sync" "time" ];
+            features = [ "macros" "rt-multi-thread" "io-util" "sync" "time" ];
           }
         ];
         devDependencies = [

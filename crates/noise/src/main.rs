@@ -4,6 +4,7 @@ mod dirs;
 mod inbox;
 mod parent;
 mod state;
+mod ticket;
 mod watch;
 mod watch_socket;
 
@@ -39,7 +40,7 @@ enum Command {
         /// The session id (default: `$CLAUDE_CODE_SESSION_ID`).
         session: Option<String>,
     },
-    /// Create and list the current session's rooms.
+    /// Create, list, invite to, and join the current session's rooms.
     #[command(subcommand)]
     Room(RoomCommand),
     /// Send a chat message to a room.
@@ -70,6 +71,15 @@ enum RoomCommand {
     /// Print the session's rooms and their members, one JSON object per
     /// line.
     List,
+    /// Print a single-use ticket that lets one session join a room. The
+    /// ticket works while this session's `noise watch` process runs, for
+    /// at most 24 hours.
+    Invite {
+        /// The room: its id, or a label that one room has.
+        room: String,
+    },
+    /// Join a room with a ticket from one of its members.
+    Join { ticket: String },
 }
 
 fn main() -> Result<()> {
@@ -77,6 +87,8 @@ fn main() -> Result<()> {
         Command::Key { session } => key(session),
         Command::Room(RoomCommand::Create { label }) => print(&Request::Create { label }),
         Command::Room(RoomCommand::List) => print(&Request::List),
+        Command::Room(RoomCommand::Invite { room }) => print(&Request::Invite { room }),
+        Command::Room(RoomCommand::Join { ticket }) => print(&Request::Join { ticket }),
         Command::Send { room, text } => {
             let text = if let Some(text) = text {
                 text
@@ -110,7 +122,8 @@ fn print(request: &Request) -> Result<()> {
         .ok_or_else(|| anyhow!("no noise watch process runs for this session"))?;
     match response {
         Response::Ok | Response::Error { .. } => {}
-        Response::Created { room } => println!("{room}"),
+        Response::Created { room } | Response::Joined { room } => println!("{room}"),
+        Response::Ticket { ticket } => println!("{ticket}"),
         Response::Sent { id } => println!("{id}"),
         Response::Rooms { rooms } => {
             for room in rooms {

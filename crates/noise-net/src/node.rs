@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use iroh::Endpoint;
 use iroh::endpoint::{Connection, VarInt};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointAddr};
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
 use iroh_gossip::{Gossip, TopicId as GossipTopicId};
 use n0_future::StreamExt;
@@ -16,6 +16,7 @@ use tokio::task::JoinSet;
 
 use crate::chunk;
 use crate::inbound::Inbound;
+use crate::join::{self, Admission, JOIN_ALPN, Redeemed, Token};
 use crate::lock;
 
 /// The session state that the network uses.
@@ -30,6 +31,14 @@ pub trait Session: Send + Sync + 'static {
     /// it when the room gets a neighbor, so that the room's members learn
     /// the session's name and status.
     fn profile(&self, room: &RoomId) -> Option<Vec<u8>>;
+
+    /// Redeems the single-use `token` of a ticket for `peer`, or returns
+    /// why it refuses the token.
+    ///
+    /// # Errors
+    ///
+    /// When no ticket of the session has the token.
+    fn redeem(&self, token: &Token, peer: PublicKey) -> Result<Redeemed, String>;
 }
 
 /// What the network did, for observers such as tests.
@@ -42,7 +51,8 @@ pub enum NetEvent {
     NeighborUp { room: RoomId, peer: PublicKey },
 }
 
-/// The session's iroh endpoint with the rooms' gossip topics.
+/// The session's iroh endpoint with the join protocol and the rooms'
+/// gossip topics.
 pub struct Node<S: Session> {
     inner: Arc<Inner<S>>,
 }
@@ -59,17 +69,28 @@ struct Inner<S: Session> {
     router: Router,
     gossip: Gossip,
     session: Arc<S>,
-    /// The sender of each open room's topic.
-    senders: Mutex<HashMap<RoomId, GossipSender>>,
+    rooms: Rooms,
     events: broadcast::Sender<NetEvent>,
     tasks: Mutex<JoinSet<()>>,
 }
 
+/// The sender of each open room's topic.
+type Rooms = Arc<Mutex<HashMap<RoomId, GossipSender>>>;
+
 impl<S: Session> Node<S> {
-    /// Starts gossip on `endpoint`.
+    /// Starts the join protocol and gossip on `endpoint`.
     pub fn spawn(endpoint: Endpoint, gossip: iroh_gossip::net::Builder, session: Arc<S>) -> Self {
         let gossip = gossip.spawn(endpoint.clone());
+        let rooms = Rooms::default();
         let router = Router::builder(endpoint)
+            .accept(
+                JOIN_ALPN,
+                JoinHandler {
+                    session: Arc::clone(&session),
+                    rooms: Arc::clone(&rooms),
+                    max_message_size: gossip.max_message_size(),
+                },
+            )
             .accept(
                 iroh_gossip::ALPN,
                 GossipGate {
@@ -84,7 +105,7 @@ impl<S: Session> Node<S> {
                 router,
                 gossip,
                 session,
-                senders: Mutex::new(HashMap::new()),
+                rooms,
                 events,
                 tasks: Mutex::new(JoinSet::new()),
             }),
@@ -123,7 +144,7 @@ impl<S: Session> Node<S> {
         let bootstrap = bootstrap.into_iter().filter(|peer| *peer != me).collect();
         let (sender, receiver) = self.inner.gossip.subscribe(topic, bootstrap).await?.split();
         let (first, first_neighbor) = oneshot::channel();
-        lock(&self.inner.senders).insert(room.id(), sender);
+        lock(&self.inner.rooms).insert(room.id(), sender);
         let node = self.clone();
         lock(&self.inner.tasks).spawn(async move {
             node.handle_room(room, receiver, first).await;
@@ -145,6 +166,20 @@ impl<S: Session> Node<S> {
         Ok(())
     }
 
+    /// Redeems `token` with `inviter`, the member that issued the ticket,
+    /// and returns the admission to the room.
+    ///
+    /// # Errors
+    ///
+    /// When the inviter cannot be reached, or refuses the token.
+    pub async fn join(&self, inviter: EndpointAddr, token: Token) -> Result<Admission> {
+        let connection = self.endpoint().connect(inviter, JOIN_ALPN).await?;
+        let (send, recv) = connection.open_bi().await?;
+        let admission = join::request(recv, send, token).await;
+        connection.close(VarInt::from_u32(0), b"done");
+        admission
+    }
+
     /// Stops the endpoint and every task of the node.
     pub async fn shutdown(&self) {
         lock(&self.inner.tasks).abort_all();
@@ -153,7 +188,7 @@ impl<S: Session> Node<S> {
     }
 
     fn sender(&self, room: &RoomId) -> Result<GossipSender> {
-        lock(&self.inner.senders)
+        lock(&self.inner.rooms)
             .get(room)
             .cloned()
             .ok_or_else(|| anyhow!("room {room} is not open"))
@@ -211,6 +246,47 @@ impl<S: Session> Node<S> {
     fn emit(&self, event: NetEvent) {
         // Without observers there is nobody to tell.
         let _ = self.inner.events.send(event);
+    }
+}
+
+/// Redeems the tokens of the session's tickets. A joining peer is no
+/// member yet, so the protocol accepts every connection, and the token
+/// decides.
+struct JoinHandler<S> {
+    session: Arc<S>,
+    rooms: Rooms,
+    max_message_size: usize,
+}
+
+impl<S> fmt::Debug for JoinHandler<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JoinHandler")
+    }
+}
+
+impl<S: Session> ProtocolHandler for JoinHandler<S> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let peer = connection.remote_id();
+        let (send, recv) = connection.accept_bi().await?;
+        let redeemed = join::respond(recv, send, |token| self.session.redeem(&token, peer))
+            .await
+            .map_err(|err| AcceptError::from_err(std::io::Error::other(err)))?;
+        let sender = redeemed.as_ref().and_then(|redeemed| {
+            let rooms = lock(&self.rooms);
+            rooms.get(&redeemed.room).cloned()
+        });
+        if let (Some(redeemed), Some(sender)) = (redeemed, sender) {
+            // The joining session announces itself when it opens the room,
+            // so a lost announcement loses nothing. The joining session
+            // also connects to this one on its own, as its first peer.
+            for chunk in chunk::split(&redeemed.announcement, self.max_message_size) {
+                let _ = sender.broadcast(Bytes::from(chunk)).await;
+            }
+        }
+        // The joining session closes the connection once it read the
+        // reply; an earlier close here could discard the reply.
+        connection.closed().await;
+        Ok(())
     }
 }
 

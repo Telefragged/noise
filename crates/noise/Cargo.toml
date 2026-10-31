@@ -10,11 +10,13 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+data-encoding = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 noise-net = { workspace = true }
 noise-room = { workspace = true }
 noise-store = { workspace = true }
+postcard = { workspace = true }
 rand = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }

@@ -1,13 +1,13 @@
 //! The session's rooms and their members, as the node and the CLI use
 //! them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use noise_net::Session;
+use noise_net::{Admission, Redeemed, Session, Token};
 use noise_room::{
     Body, Member, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
 };
@@ -18,6 +18,9 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::delivery::{Arrival, RoomRef, Shown, display_name};
 
+/// How long a ticket stays valid after the session issued it.
+pub const TICKET_LIFETIME: Duration = Duration::from_hours(24);
+
 /// The rooms of one session and their members. Each change to a room or
 /// its members reaches the session's rooms file before the call returns.
 pub struct SessionState {
@@ -25,6 +28,7 @@ pub struct SessionState {
     dir: SessionDir,
     config: PathBuf,
     rooms: Mutex<BTreeMap<RoomId, RoomMembers>>,
+    tickets: Mutex<HashMap<Token, Issued>>,
     arrivals: mpsc::UnboundedSender<Arrival>,
 }
 
@@ -73,6 +77,13 @@ impl RoomMembers {
     }
 }
 
+/// The room of a ticket that the session issued, and when the ticket
+/// expires.
+struct Issued {
+    room: RoomId,
+    expires: Instant,
+}
+
 /// A room, as `noise room list` prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomInfo {
@@ -114,6 +125,7 @@ impl SessionState {
             dir: dir.clone(),
             config,
             rooms: Mutex::new(rooms),
+            tickets: Mutex::new(HashMap::new()),
             arrivals,
         })
     }
@@ -142,6 +154,27 @@ impl SessionState {
         let me = self.me()?;
         self.insert(room.clone(), vec![me])?;
         Ok(room)
+    }
+
+    /// Adds the room of `admission`, which this session joined. Returns the
+    /// room and its other members, the peers to join its topic through.
+    ///
+    /// # Errors
+    ///
+    /// When the config or the rooms file fails.
+    pub fn join(&self, admission: Admission) -> Result<(Room, Vec<PublicKey>)> {
+        let room = Room::new(admission.label, admission.secret);
+        let me = self.me()?;
+        let peers = admission
+            .members
+            .iter()
+            .map(|member| member.key)
+            .filter(|key| *key != me.key)
+            .collect();
+        let mut members = admission.members;
+        members.push(me);
+        self.insert(room.clone(), members)?;
+        Ok((room, peers))
     }
 
     /// The room that `room` names: a room id, or a label that exactly one
@@ -211,6 +244,25 @@ impl SessionState {
                 (entry.room.clone(), peers.collect())
             })
             .collect()
+    }
+
+    /// The single-use token of a new ticket to `room`, which stays valid
+    /// for [`TICKET_LIFETIME`] or until this process ends.
+    ///
+    /// # Errors
+    ///
+    /// When the session has no such room.
+    pub fn issue_ticket(&self, room: &RoomId) -> Result<Token> {
+        if !self.lock().contains_key(room) {
+            bail!("the session has no room {room}");
+        }
+        let token = rand::random();
+        let issued = Issued {
+            room: *room,
+            expires: Instant::now() + TICKET_LIFETIME,
+        };
+        lock(&self.tickets).insert(token, issued);
+        Ok(token)
     }
 
     /// The session's rooms and their members.
@@ -328,6 +380,35 @@ impl Session for SessionState {
         let (name, status) = self.name_and_status().ok()?;
         let (_, sealed) = self.seal(room, Body::Profile { name, status }).ok()?;
         Some(sealed)
+    }
+
+    fn redeem(&self, token: &Token, peer: PublicKey) -> Result<Redeemed, String> {
+        let issued = lock(&self.tickets)
+            .remove(token)
+            .ok_or("the ticket was used already, or this session did not issue it")?;
+        if issued.expires < Instant::now() {
+            return Err("the ticket expired".into());
+        }
+        let mut rooms = self.lock();
+        let entry = rooms
+            .get_mut(&issued.room)
+            .ok_or("the inviter left the room")?;
+        entry.add(peer);
+        let admission = Admission {
+            label: entry.room.label().to_owned(),
+            secret: entry.room.secret().clone(),
+            members: entry.members.values().cloned().collect(),
+        };
+        let (_, announcement) = entry
+            .room
+            .seal(&self.key, Body::Admit { key: peer }, now())
+            .map_err(|err| err.to_string())?;
+        self.save(&rooms).map_err(|err| format!("{err:#}"))?;
+        Ok(Redeemed {
+            room: issued.room,
+            admission,
+            announcement,
+        })
     }
 }
 
@@ -500,5 +581,42 @@ mod tests {
         let (own, _) = fixture.state.seal(&id, text("mine", "me")).expect("seal");
         fixture.state.receive(&id, own);
         assert!(fixture.arrivals.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_ticket_redeems_once() {
+        let fixture = fixture();
+        let (id, peer) = (fixture.room.id(), key(9).public());
+        let token = fixture.state.issue_ticket(&id).expect("ticket");
+        let redeemed = fixture.state.redeem(&token, peer).expect("redeem");
+        assert_eq!(redeemed.room, id);
+        assert_eq!(redeemed.admission.secret, *fixture.room.secret());
+        let announcement = fixture.room.open(&redeemed.announcement).expect("open");
+        assert_eq!(announcement.message().body, Body::Admit { key: peer });
+        assert!(fixture.state.admits(&peer));
+        assert!(fixture.state.redeem(&token, key(10).public()).is_err());
+        assert!(!fixture.state.admits(&key(10).public()));
+    }
+
+    #[test]
+    fn an_admission_joins_its_room() {
+        let fixture = fixture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sender, _) = mpsc::unbounded_channel();
+        let config = dir.path().join("config.toml");
+        let joiner = SessionState::open(&SessionDir::new(dir.path(), "s2"), config, sender)
+            .expect("session state");
+        let token = fixture
+            .state
+            .issue_ticket(&fixture.room.id())
+            .expect("ticket");
+        let redeemed = fixture
+            .state
+            .redeem(&token, joiner.key().public())
+            .expect("redeem");
+        let (room, peers) = joiner.join(redeemed.admission).expect("join");
+        assert_eq!(room, fixture.room);
+        assert_eq!(peers, vec![fixture.state.key().public()]);
+        assert_eq!(joiner.list()[0].members.len(), 2);
     }
 }

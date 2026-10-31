@@ -10,7 +10,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use iroh::Endpoint;
@@ -26,11 +26,16 @@ use crate::delivery::{Arrival, Delivery};
 use crate::inbox::Inbox;
 use crate::parent::exit_with_parent;
 use crate::state::SessionState;
+use crate::ticket::Ticket;
 use crate::watch_socket::{self, Request, Response, SOCKET_FILE};
 
 /// The lock file that keeps one `noise watch` process per session.
 /// `SessionStart` hooks run again after compaction, with the same id.
 const LOCK_FILE: &str = "watch.lock";
+
+/// How long `noise room join` waits for the room's first neighbor, so
+/// that a message sent right after the join reaches the room.
+const JOIN_WAIT: Duration = Duration::from_secs(10);
 
 /// The builder of the session's endpoint, before the session's key.
 type Bind = fn() -> Result<Builder>;
@@ -157,6 +162,28 @@ impl Watch {
                 }
                 Response::Ok
             }
+            Request::Invite { room } => {
+                let token = state.issue_ticket(&state.resolve(&room)?)?;
+                let ticket = Ticket {
+                    inviter: self.node().await?.endpoint().addr(),
+                    token,
+                };
+                Response::Ticket {
+                    ticket: ticket.encode()?,
+                }
+            }
+            Request::Join { ticket } => {
+                let ticket = Ticket::decode(&ticket)?;
+                let node = self.node().await?;
+                let admission = node.join(ticket.inviter, ticket.token).await?;
+                let (room, peers) = state.join(admission)?;
+                let id = room.id();
+                let first_neighbor = node.open_room(room, peers).await?;
+                // The room works without a neighbor too; the wait only
+                // lets a message sent right after the join reach it.
+                let _ = tokio::time::timeout(JOIN_WAIT, first_neighbor).await;
+                Response::Joined { room: id }
+            }
         })
     }
 }
@@ -259,7 +286,9 @@ fn lock(path: &Path) -> Result<Option<File>> {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use noise_room::RoomId;
+    use noise_net::{NetEvent, Session};
+    use noise_room::{PublicKey, RoomId};
+    use tokio::sync::broadcast;
 
     use super::*;
 
@@ -320,6 +349,48 @@ mod tests {
         room
     }
 
+    async fn invite(watch: &Arc<Watch>, room: &str) -> String {
+        let invited = reply(watch, Request::Invite { room: room.into() }).await;
+        let Response::Ticket { ticket } = invited else {
+            panic!("expected a ticket, got {invited:?}");
+        };
+        ticket
+    }
+
+    async fn events(watch: &Arc<Watch>) -> broadcast::Receiver<NetEvent> {
+        watch.node().await.expect("node").events()
+    }
+
+    /// Returns at the event that reports `peer` as a neighbor.
+    async fn neighbor_up(events: &mut broadcast::Receiver<NetEvent>, peer: PublicKey) {
+        loop {
+            if let NetEvent::NeighborUp { peer: up, .. } = events.recv().await.expect("receive")
+                && up == peer
+            {
+                return;
+            }
+        }
+    }
+
+    /// A room that `a` created and `b` joined, once each is the other's
+    /// gossip neighbor, and the ticket that `b` used.
+    async fn joined(a: &Arc<Watch>, b: &Arc<Watch>) -> (RoomId, String) {
+        let room = create(a, "ci").await;
+        let (mut events_a, mut events_b) = (events(a).await, events(b).await);
+        let ticket = invite(a, "ci").await;
+        let joined = reply(
+            b,
+            Request::Join {
+                ticket: ticket.clone(),
+            },
+        )
+        .await;
+        assert_eq!(joined, Response::Joined { room });
+        neighbor_up(&mut events_a, b.state.key().public()).await;
+        neighbor_up(&mut events_b, a.state.key().public()).await;
+        (room, ticket)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_created_room_takes_messages_by_label_or_id() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -365,6 +436,49 @@ mod tests {
         };
         assert_eq!(rooms[0].members[0].status, "CI optimization");
         stop(&watch).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ticket_joins_one_session_and_its_messages_arrive() {
+        let roots: Vec<_> = (0..3)
+            .map(|_| tempfile::tempdir().expect("tempdir"))
+            .collect();
+        let (a, mut arrivals_a) = watch(roots[0].path(), "a").await;
+        let (b, _) = watch(roots[1].path(), "b").await;
+        let (c, _) = watch(roots[2].path(), "c").await;
+        let (room, ticket) = joined(&a, &b).await;
+        for watch in [&a, &b] {
+            let Response::Rooms { rooms } = reply(watch, Request::List).await else {
+                panic!("expected rooms");
+            };
+            assert_eq!((rooms[0].id, rooms[0].members.len()), (room, 2));
+        }
+
+        let sent = reply(
+            &b,
+            Request::Send {
+                room: "ci".into(),
+                text: "hello from b".into(),
+            },
+        )
+        .await;
+        assert!(matches!(sent, Response::Sent { .. }), "{sent:?}");
+        match arrivals_a.recv().await.expect("receive") {
+            Arrival::Text { message, .. } => {
+                assert_eq!(
+                    (message.text.as_str(), message.name.as_str()),
+                    ("hello from b", "b")
+                );
+            }
+            other => panic!("expected a text, got {other:?}"),
+        }
+
+        let again = reply(&c, Request::Join { ticket }).await;
+        assert!(matches!(again, Response::Error { .. }), "{again:?}");
+        assert!(!a.state.admits(&c.state.key().public()));
+        for watch in [&a, &b, &c] {
+            stop(watch).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
