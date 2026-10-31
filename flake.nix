@@ -207,22 +207,27 @@
         }
       );
 
-      checks = forAllSystems (pkgs: {
-        build = self.packages.${pkgs.system}.noise;
-        # Also clippy-checks the test targets (lib/bins are linted in every
-        # build). Tests run here, not in `nix build`. Rustdoc runs in the same
-        # build (rustdocPostBuild): the docs render and the doc tests run.
-        test = (cargoNixFor pkgs).workspaceMembers."noise".build.override {
-          runTests = true;
-        };
-        treefmt = pkgs.stdenvNoCC.mkDerivation {
-          name = "treefmt-check";
-          src = self;
-          nativeBuildInputs = [ self.formatter.${pkgs.system} ];
-          buildPhase = "HOME=$TMPDIR treefmt --ci --tree-root .";
-          installPhase = "touch $out";
-        };
-      });
+      checks = forAllSystems (
+        pkgs:
+        # One `test-<crate>` check per workspace member. Each also
+        # clippy-checks the test targets (lib/bins are linted in every
+        # build). Tests run here, not in `nix build`. Rustdoc runs in the
+        # same build (rustdocPostBuild): the docs render and the doc tests
+        # run.
+        nixpkgs.lib.mapAttrs' (
+          name: member: nixpkgs.lib.nameValuePair "test-${name}" (member.build.override { runTests = true; })
+        ) (cargoNixFor pkgs).workspaceMembers
+        // {
+          build = self.packages.${pkgs.system}.noise;
+          treefmt = pkgs.stdenvNoCC.mkDerivation {
+            name = "treefmt-check";
+            src = self;
+            nativeBuildInputs = [ self.formatter.${pkgs.system} ];
+            buildPhase = "HOME=$TMPDIR treefmt --ci --tree-root .";
+            installPhase = "touch $out";
+          };
+        }
+      );
 
       # `nix run .#release-check` prints whether HEAD is a release
       # (release/check.sh). The release workflow runs it.
