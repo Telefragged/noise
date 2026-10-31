@@ -12,7 +12,7 @@ use iroh_gossip::{Gossip, TopicId as GossipTopicId};
 use n0_future::StreamExt;
 use noise_room::{PublicKey, Room, RoomId, Verified};
 use tokio::sync::{broadcast, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 
 use crate::chunk;
 use crate::inbound::Inbound;
@@ -74,8 +74,9 @@ struct Inner<S: Session> {
     tasks: Mutex<JoinSet<()>>,
 }
 
-/// The sender of each open room's topic.
-type Rooms = Arc<Mutex<HashMap<RoomId, GossipSender>>>;
+/// The open rooms: the sender of each room's topic, and the task that
+/// handles its events.
+type Rooms = Arc<Mutex<HashMap<RoomId, (GossipSender, AbortHandle)>>>;
 
 impl<S: Session> Node<S> {
     /// Starts the join protocol and gossip on `endpoint`.
@@ -144,12 +145,22 @@ impl<S: Session> Node<S> {
         let bootstrap = bootstrap.into_iter().filter(|peer| *peer != me).collect();
         let (sender, receiver) = self.inner.gossip.subscribe(topic, bootstrap).await?.split();
         let (first, first_neighbor) = oneshot::channel();
-        lock(&self.inner.rooms).insert(room.id(), sender);
+        let id = room.id();
         let node = self.clone();
-        lock(&self.inner.tasks).spawn(async move {
+        let task = lock(&self.inner.tasks).spawn(async move {
             node.handle_room(room, receiver, first).await;
         });
+        if let Some((_, old)) = lock(&self.inner.rooms).insert(id, (sender, task)) {
+            old.abort();
+        }
         Ok(first_neighbor)
+    }
+
+    /// Leaves `room`'s gossip topic.
+    pub fn close_room(&self, room: &RoomId) {
+        if let Some((_, task)) = lock(&self.inner.rooms).remove(room) {
+            task.abort();
+        }
     }
 
     /// Broadcasts `sealed`, a message sealed for `room`, as chunks on the
@@ -190,7 +201,7 @@ impl<S: Session> Node<S> {
     fn sender(&self, room: &RoomId) -> Result<GossipSender> {
         lock(&self.inner.rooms)
             .get(room)
-            .cloned()
+            .map(|(sender, _)| sender.clone())
             .ok_or_else(|| anyhow!("room {room} is not open"))
     }
 
@@ -273,7 +284,7 @@ impl<S: Session> ProtocolHandler for JoinHandler<S> {
             .map_err(|err| AcceptError::from_err(std::io::Error::other(err)))?;
         let sender = redeemed.as_ref().and_then(|redeemed| {
             let rooms = lock(&self.rooms);
-            rooms.get(&redeemed.room).cloned()
+            rooms.get(&redeemed.room).map(|(sender, _)| sender.clone())
         });
         if let (Some(redeemed), Some(sender)) = (redeemed, sender) {
             // The joining session announces itself when it opens the room,

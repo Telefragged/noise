@@ -177,6 +177,17 @@ impl SessionState {
         Ok((room, peers))
     }
 
+    /// Removes `room`, which this session left.
+    ///
+    /// # Errors
+    ///
+    /// When the rooms file cannot be written.
+    pub fn remove(&self, room: &RoomId) -> Result<()> {
+        let mut rooms = self.lock();
+        rooms.remove(room);
+        self.save(&rooms)
+    }
+
     /// The room that `room` names: a room id, or a label that exactly one
     /// of the session's rooms has.
     ///

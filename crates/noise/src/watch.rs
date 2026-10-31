@@ -184,6 +184,17 @@ impl Watch {
                 let _ = tokio::time::timeout(JOIN_WAIT, first_neighbor).await;
                 Response::Joined { room: id }
             }
+            Request::Leave { room } => {
+                let room = state.resolve(&room)?;
+                let (_, sealed) = state.seal(&room, Body::Leave)?;
+                let node = self.node().await?;
+                // A member that misses the leave still has the session in
+                // its list, which only lets the session connect.
+                let _ = node.send(&room, &sealed).await;
+                node.close_room(&room);
+                state.remove(&room)?;
+                Response::Ok
+            }
         })
     }
 }
@@ -479,6 +490,34 @@ mod tests {
         for watch in [&a, &b, &c] {
             stop(watch).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_that_leaves_drops_the_room_and_the_room_posts_it() {
+        let roots: Vec<_> = (0..2)
+            .map(|_| tempfile::tempdir().expect("tempdir"))
+            .collect();
+        let (a, mut arrivals_a) = watch(roots[0].path(), "a").await;
+        let (b, _) = watch(roots[1].path(), "b").await;
+        joined(&a, &b).await;
+
+        assert_eq!(
+            reply(&b, Request::Leave { room: "ci".into() }).await,
+            Response::Ok
+        );
+        let Response::Rooms { rooms } = reply(&b, Request::List).await else {
+            panic!("expected rooms");
+        };
+        assert_eq!(rooms.len(), 0);
+        match arrivals_a.recv().await.expect("receive") {
+            Arrival::Left { key, name, .. } => {
+                assert_eq!((key, name.as_str()), (b.state.key().public(), "b"));
+            }
+            other => panic!("expected a leave, got {other:?}"),
+        }
+        assert!(!a.state.admits(&b.state.key().public()));
+        stop(&a).await;
+        stop(&b).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
