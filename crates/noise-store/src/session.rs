@@ -3,9 +3,26 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use iroh_base::{PublicKey, SecretKey};
+use noise_room::{Member, RoomSecret};
+use serde::{Deserialize, Serialize};
 
 /// The name of the file that contains a session's secret key.
 const KEY_FILE: &str = "key";
+
+/// The name of the file that contains a session's status.
+const STATUS_FILE: &str = "status";
+
+/// The name of the file that contains a session's rooms.
+const ROOMS_FILE: &str = "rooms.json";
+
+/// A room of the session, as its rooms file has it: what a restarted
+/// `noise watch` process needs to rejoin the room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomRecord {
+    pub label: String,
+    pub secret: RoomSecret,
+    pub members: Vec<Member>,
+}
 
 /// The state directory of one Claude Code session:
 /// `<root>/sessions/<session-id>/`.
@@ -27,6 +44,59 @@ impl SessionDir {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The session's rooms, none when the session has no rooms file.
+    ///
+    /// # Errors
+    ///
+    /// When the rooms file cannot be read or parsed.
+    pub fn rooms(&self) -> io::Result<Vec<RoomRecord>> {
+        match fs::read(self.path.join(ROOMS_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Replaces the session's rooms. The new file reaches the disk under
+    /// another name first and then replaces the old one, so a crash leaves
+    /// one of the two whole.
+    ///
+    /// # Errors
+    ///
+    /// When the rooms file cannot be written.
+    pub fn set_rooms(&self, rooms: &[RoomRecord]) -> io::Result<()> {
+        fs::create_dir_all(&self.path)?;
+        let next = self.path.join(format!("{ROOMS_FILE}.next"));
+        let mut file = fs::File::create(&next)?;
+        file.write_all(&serde_json::to_vec_pretty(rooms)?)?;
+        file.sync_all()?;
+        fs::rename(&next, self.path.join(ROOMS_FILE))?;
+        crate::sync_dir(&self.path)
+    }
+
+    /// The session's status, empty when the session has set none.
+    ///
+    /// # Errors
+    ///
+    /// When the status file cannot be read.
+    pub fn status(&self) -> io::Result<String> {
+        match fs::read_to_string(self.path.join(STATUS_FILE)) {
+            Ok(status) => Ok(status),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Replaces the session's status.
+    ///
+    /// # Errors
+    ///
+    /// When the status file cannot be written.
+    pub fn set_status(&self, status: &str) -> io::Result<()> {
+        fs::create_dir_all(&self.path)?;
+        fs::write(self.path.join(STATUS_FILE), status)
     }
 
     /// The session's secret key. The first call creates it.
@@ -144,6 +214,35 @@ mod tests {
                 .collect()
         });
         assert!(keys.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn the_status_is_empty_until_set() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = SessionDir::new(root.path(), "s1");
+        assert_eq!(session.status().expect("status"), "");
+        session.set_status("CI optimization").expect("set status");
+        assert_eq!(session.status().expect("status"), "CI optimization");
+    }
+
+    #[test]
+    fn the_rooms_round_trip_through_their_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = SessionDir::new(root.path(), "s1");
+        assert_eq!(session.rooms().expect("read rooms"), Vec::new());
+        let rooms = vec![RoomRecord {
+            label: "ci".into(),
+            secret: RoomSecret::from_bytes([3; 32]),
+            members: vec![Member {
+                key: SecretKey::from_bytes(&[1; 32]).public(),
+                name: "vetle".into(),
+                status: "CI".into(),
+            }],
+        }];
+        session.set_rooms(&rooms).expect("write rooms");
+        assert_eq!(session.rooms().expect("read rooms"), rooms);
+        session.set_rooms(&[]).expect("write rooms");
+        assert_eq!(session.rooms().expect("read rooms"), Vec::new());
     }
 
     #[test]

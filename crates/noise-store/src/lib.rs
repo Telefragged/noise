@@ -1,15 +1,15 @@
-//! The files that noise keeps for each Claude Code session.
+//! The files of each Claude Code session's state directory.
 //!
 //! Each session has its own directory under the state root, and no file
-//! is shared between sessions. noise assumes that no other local process
-//! modifies a session's directory.
+//! is shared between sessions. No check covers a change to a session's
+//! directory by another local process.
 
 mod session;
 
 use std::io;
 use std::path::Path;
 
-pub use session::SessionDir;
+pub use session::{RoomRecord, SessionDir};
 
 /// Flushes the entries of `dir` to the disk, so that a file created or
 /// linked in it survives a crash.
