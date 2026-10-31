@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/noise", "crates/noise-room", "crates/noise-store"]
+members = [
+  "crates/noise",
+  "crates/noise-room",
+  "crates/noise-net",
+  "crates/noise-store",
+]
 resolver = "3"
 
 [workspace.package]
@@ -15,6 +20,7 @@ data-encoding = "2"
 iroh = "1.4.1"
 iroh-base = { version = "1.4.1", default-features = false, features = ["key"] }
 iroh-gossip = "0.101.0"
+noise-room = { path = "crates/noise-room" }
 noise-store = { path = "crates/noise-store" }
 postcard = { version = "1", features = ["use-std"] }
 rand = "0.10"
