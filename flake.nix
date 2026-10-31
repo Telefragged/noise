@@ -109,6 +109,15 @@
           cargoPkgs = if pkgs.stdenv.hostPlatform.isLinux then pkgs.pkgsStatic else pkgs;
           rustToolchain = rustToolchainFor cargoPkgs.buildPackages;
           lints = cargoToml.workspace.lints;
+          # The features that cargo resolved for each crate, by name and
+          # version. Cargo.nix records them, but does not pass them on to
+          # buildRustCrateForPkgs; a crate without any has no entry.
+          cargoFeatures = nixpkgs.lib.mapAttrs' (
+            _: crate:
+            nixpkgs.lib.nameValuePair "${crate.crateName} ${crate.version}" (
+              crate.resolvedDefaultFeatures or [ ]
+            )
+          ) (cargoPkgs.callPackage ./Cargo.nix { }).internal.crates;
         in
         cargoPkgs.callPackage ./Cargo.nix {
           buildRustCrateForPkgs =
@@ -127,8 +136,23 @@
             let
               drv = base crate;
             in
+            # A dependency builds only with the features that cargo also
+            # resolved for it. crate2nix's own resolution takes a `dep:x`
+            # entry as the feature named `x` when the crate also has a
+            # feature of that name: reqwest's `__rustls` then enables
+            # reqwest's `rustls` feature, which turns on aws-lc-rs in rustls
+            # without the aws-lc-rs crate. Cargo's set alone does not work
+            # either: it covers every target, so it enables features whose
+            # optional dependencies crate2nix left out for this one.
             if crate ? sha256 then
-              drv
+              base (
+                crate
+                // {
+                  features =
+                    nixpkgs.lib.intersectLists crate.features
+                      cargoFeatures."${crate.crateName} ${crate.version}";
+                }
+              )
             else
               drv.override (_: {
                 useClippy = true;
