@@ -6,6 +6,7 @@ pub mod chunk;
 mod inbound;
 mod join;
 mod node;
+pub mod status;
 #[cfg(test)]
 mod tests;
 
