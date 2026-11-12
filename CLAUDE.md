@@ -50,7 +50,9 @@ comments, and release notes.
 
 ## Layout
 
-- `crates/noise/` — the `noise` binary
+- `crates/noise/` — the `noise` binary: the CLI and the `noise watch`
+  process. `plugin/` is the Claude Code plugin that it compiles in and
+  `noise install-plugin` installs.
 - `crates/noise-net/` — the iroh layer: gossip, chunks, the join
   protocol and admission
 - `crates/noise-room/` — the room model: a room secret, and signed and

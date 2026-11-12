@@ -3,6 +3,7 @@ mod delivery;
 mod dirs;
 mod inbox;
 mod parent;
+mod plugin;
 mod state;
 mod status;
 mod ticket;
@@ -75,6 +76,8 @@ enum Command {
         #[arg(long)]
         stop: bool,
     },
+    /// Install the Claude Code plugin that this build contains.
+    InstallPlugin,
 }
 
 #[derive(Subcommand)]
@@ -123,6 +126,7 @@ fn main() -> Result<()> {
         Command::Watch { stop: false } => watch::run(&current_session_dir()?),
         // A session without a running process has nothing to stop.
         Command::Watch { stop: true } => request(&Request::Stop).map(|_| ()),
+        Command::InstallPlugin => plugin::install_plugin(),
     }
 }
 
@@ -138,8 +142,9 @@ fn request(request: &Request) -> Result<Option<Response>> {
 /// Sends `request` to the current session's `noise watch` process and
 /// prints the result.
 fn print(request: &Request) -> Result<()> {
-    let response = self::request(request)?
-        .ok_or_else(|| anyhow!("no noise watch process runs for this session"))?;
+    let response = self::request(request)?.ok_or_else(|| {
+        anyhow!("no noise watch process runs for this session; is the noise plugin installed?")
+    })?;
     match response {
         Response::Ok | Response::Error { .. } => {}
         Response::Created { room } | Response::Joined { room } => println!("{room}"),

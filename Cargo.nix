@@ -4317,6 +4317,49 @@ rec {
         };
         resolvedDefaultFeatures = [ "aio_tokio" "bytes" "default" "futures" "http" "http-body-util" "hyper" "hyper-util" "tokio" ];
       };
+      "include_dir" = rec {
+        crateName = "include_dir";
+        version = "0.7.4";
+        edition = "2021";
+        sha256 = "1pfh3g45z88kwq93skng0n6g3r7zkhq9ldqs9y8rvr7i11s12gcj";
+        authors = [
+          "Michael Bryan <michaelfbryan@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "include_dir_macros";
+            packageId = "include_dir_macros";
+          }
+        ];
+        features = {
+          "glob" = [ "dep:glob" ];
+          "metadata" = [ "include_dir_macros/metadata" ];
+          "nightly" = [ "include_dir_macros/nightly" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
+      "include_dir_macros" = rec {
+        crateName = "include_dir_macros";
+        version = "0.7.4";
+        edition = "2021";
+        sha256 = "0x8smnf6knd86g69p19z5lpfsaqp8w0nx14kdpkz1m8bxnkqbavw";
+        procMacro = true;
+        authors = [
+          "Michael Bryan <michaelfbryan@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+        ];
+        features = {
+        };
+      };
       "indexmap" = rec {
         crateName = "indexmap";
         version = "2.14.2";
@@ -6906,6 +6949,10 @@ rec {
             packageId = "anyhow";
           }
           {
+            name = "blake3";
+            packageId = "blake3";
+          }
+          {
             name = "clap";
             packageId = "clap";
             features = [ "derive" ];
@@ -6913,6 +6960,10 @@ rec {
           {
             name = "data-encoding";
             packageId = "data-encoding";
+          }
+          {
+            name = "include_dir";
+            packageId = "include_dir";
           }
           {
             name = "iroh";
@@ -6971,6 +7022,11 @@ rec {
           {
             name = "tempfile";
             packageId = "tempfile";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "rt-multi-thread" "test-util" ];
           }
         ];
 

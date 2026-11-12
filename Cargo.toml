@@ -18,6 +18,7 @@ bytes = "1"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
+include_dir = "0.7"
 iroh = "1.4.1"
 iroh-base = { version = "1.4.1", default-features = false, features = ["key"] }
 iroh-gossip = "0.101.0"

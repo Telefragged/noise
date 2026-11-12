@@ -1,0 +1,215 @@
+//! `noise install-plugin` — install the Claude Code plugin that this build
+//! contains.
+//!
+//! The plugin is in a store at `$XDG_DATA_HOME/noise/claude-plugin/`. The
+//! store contains one directory per plugin version and a `current`
+//! symlink to one of them. Claude Code reads `current` as the `noise`
+//! marketplace. An install takes three steps, and after each step
+//! `current` points at a complete plugin:
+//!
+//! 1. Remove every entry except `current` and the version that it points at.
+//! 2. Write the plugin into a temporary directory and sync it. Then rename
+//!    the directory to its version.
+//! 3. Make a temporary symlink to that version and rename it over `current`.
+//!
+//! The cleanup runs first, so the previous version stays until the next
+//! install. A Claude Code process that copies it at the same time can finish.
+
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, ensure};
+
+static PLUGIN: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/plugin");
+
+/// The plugin's version: noise's version and a hash of the plugin's files.
+/// A build with changed plugin files and the same noise version gets its
+/// own directory in the store, and Claude Code installs it as a new
+/// version.
+fn version() -> String {
+    let mut files = Vec::new();
+    collect_files(&PLUGIN, &mut files);
+    files.sort_by_key(|file| file.path());
+    let mut hasher = blake3::Hasher::new();
+    for file in files {
+        let path = file.path().as_os_str().as_encoded_bytes();
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path);
+        hasher.update(&(file.contents().len() as u64).to_le_bytes());
+        hasher.update(file.contents());
+    }
+    let hash = hasher.finalize().to_hex();
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), &hash[..12])
+}
+
+fn collect_files<'a>(dir: &'a include_dir::Dir<'a>, files: &mut Vec<&'a include_dir::File<'a>>) {
+    files.extend(dir.files());
+    for dir in dir.dirs() {
+        collect_files(dir, files);
+    }
+}
+
+/// Installs this build's plugin into the store and registers it with Claude
+/// Code.
+///
+/// Prints a note and writes nothing when Claude Code is not installed,
+/// that is, when it has no config directory or `claude` is not on `PATH`.
+///
+/// # Errors
+///
+/// When a write to the store fails, or when `claude` fails.
+pub fn install_plugin() -> Result<()> {
+    if !claude_config_dir()?.is_dir() || on_path("claude").is_none() {
+        println!("Claude Code is not installed, so the noise plugin was not installed");
+        return Ok(());
+    }
+    let data = crate::dirs::xdg("XDG_DATA_HOME", &[".local", "share"])?;
+    let current = install_to(&data.join("noise").join("claude-plugin"))?;
+    run(Command::new("claude")
+        .args(["plugin", "marketplace", "add"])
+        .arg(&current))?;
+    run(Command::new("claude").args(["plugin", "install", "noise@noise"]))
+}
+
+/// The first file named `name` in a directory of `PATH`.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn claude_config_dir() -> Result<PathBuf> {
+    if let Some(dir) = crate::dirs::env_var("CLAUDE_CONFIG_DIR") {
+        return Ok(dir.into());
+    }
+    let home = crate::dirs::env_var("HOME").context("$HOME is not set")?;
+    Ok(PathBuf::from(home).join(".claude"))
+}
+
+/// Writes this build's plugin into `store` and points `store/current` at it.
+///
+/// Returns the path of `current`.
+fn install_to(store: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(store).with_context(|| format!("creating {}", store.display()))?;
+    remove_stale(store)?;
+    let name = version();
+    let version = store.join(&name);
+    let tmp = store.join(format!(".tmp-{}", std::process::id()));
+    // A version directory that survives the cleanup is the target of
+    // `current`, so it is complete.
+    if !version.exists() {
+        write_plugin(&tmp, &name)?;
+        fs::rename(&tmp, &version).context("renaming the plugin to its version")?;
+        // Without this sync, a crash can keep the rename of `current` but
+        // lose this one.
+        sync(store)?;
+    }
+    let link = tmp.with_extension("link");
+    let current = store.join("current");
+    std::os::unix::fs::symlink(&name, &link).context("linking the plugin")?;
+    fs::rename(&link, &current).context("replacing the current plugin")?;
+    sync(store)?;
+    Ok(current)
+}
+
+/// Removes every entry of `store` except `current` and its target.
+fn remove_stale(store: &Path) -> Result<()> {
+    let target = fs::read_link(store.join("current")).ok();
+    for entry in fs::read_dir(store)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "current" || target.as_deref() == Some(name.as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        }
+        .with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Writes the plugin and its marketplace manifest, with `version`, into
+/// `dir`, synced to disk.
+fn write_plugin(dir: &Path, version: &str) -> Result<()> {
+    fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    PLUGIN.extract(dir).context("writing the plugin")?;
+    let manifest = serde_json::json!({
+        "name": "noise",
+        "owner": { "name": "Telefragged" },
+        "plugins": [{ "name": "noise", "source": "./", "version": version }],
+    });
+    fs::write(
+        dir.join(".claude-plugin/marketplace.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )
+    .context("writing the marketplace manifest")?;
+    sync_tree(dir)
+}
+
+/// Syncs every file and directory under `path` to disk, children first.
+fn sync_tree(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            sync_tree(&entry?.path())?;
+        }
+    }
+    sync(path)
+}
+
+fn sync(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("syncing {}", path.display()))
+}
+
+fn run(cmd: &mut Command) -> Result<()> {
+    let status = cmd.status().with_context(|| format!("running {cmd:?}"))?;
+    ensure!(status.success(), "{cmd:?} exited with {status}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::symlink;
+
+    fn entries(store: &Path) -> BTreeSet<String> {
+        fs::read_dir(store)
+            .expect("read store")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn install_keeps_the_previous_version_until_the_next_install() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path();
+        fs::create_dir(store.join("0.0.1")).expect("previous");
+        symlink("0.0.1", store.join("current")).expect("current");
+        fs::create_dir(store.join("0.0.0")).expect("stale version");
+        fs::write(store.join(".tmp-1"), "").expect("stale temp");
+
+        let current = install_to(store).expect("install");
+        let version = version();
+        let installed = BTreeSet::from(["current".into(), "0.0.1".into(), version.clone()]);
+        assert_eq!(entries(store), installed);
+        assert_eq!(fs::read_link(&current).expect("link"), Path::new(&version));
+        assert!(current.join(".claude-plugin/plugin.json").is_file());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(current.join(".claude-plugin/marketplace.json")).expect("manifest"),
+        )
+        .expect("json");
+        assert_eq!(manifest["plugins"][0]["version"], version.as_str());
+
+        install_to(store).expect("reinstall");
+        let reinstalled = BTreeSet::from(["current".into(), version.clone()]);
+        assert_eq!(entries(store), reinstalled);
+    }
+}
