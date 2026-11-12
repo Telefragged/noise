@@ -9,10 +9,6 @@ concurrency: release
 
 jobs:
   release:
-    # Off until the first release. No release tag exists yet, so the first
-    # push to master that runs this job publishes the version in Cargo.toml.
-    # Removing this line is the first release.
-    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
