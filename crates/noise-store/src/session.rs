@@ -1,5 +1,6 @@
-use std::fs;
+use std::fs::{self, DirBuilder, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use iroh_base::{PublicKey, SecretKey};
@@ -14,6 +15,13 @@ const STATUS_FILE: &str = "status";
 
 /// The name of the file that contains a session's rooms.
 const ROOMS_FILE: &str = "rooms.json";
+
+/// The mode of a session's directory: only the user can enter it.
+const DIR_MODE: u32 = 0o700;
+
+/// The mode of the key file and the rooms file, which contain the
+/// session's secret key and the room secrets: only the user can read them.
+const FILE_MODE: u32 = 0o600;
 
 /// A room of the session, as its rooms file has it: what a restarted
 /// `noise watch` process needs to rejoin the room.
@@ -46,6 +54,21 @@ impl SessionDir {
         &self.path
     }
 
+    /// Creates the session's directory with the mode 0700, so that only
+    /// the user can enter it. A directory that exists with another mode,
+    /// which an earlier version of noise created, gets this mode too.
+    ///
+    /// # Errors
+    ///
+    /// When the directory cannot be created or its mode cannot be set.
+    pub fn create(&self) -> io::Result<()> {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(DIR_MODE)
+            .create(&self.path)?;
+        fs::set_permissions(&self.path, Permissions::from_mode(DIR_MODE))
+    }
+
     /// The session's rooms, none when the session has no rooms file.
     ///
     /// # Errors
@@ -67,9 +90,11 @@ impl SessionDir {
     ///
     /// When the rooms file cannot be written.
     pub fn set_rooms(&self, rooms: &[RoomRecord]) -> io::Result<()> {
-        fs::create_dir_all(&self.path)?;
+        self.create()?;
         let next = self.path.join(format!("{ROOMS_FILE}.next"));
-        let mut file = fs::File::create(&next)?;
+        let mut file = private().create(true).truncate(true).open(&next)?;
+        // A file that a crash left here keeps the mode it has.
+        file.set_permissions(Permissions::from_mode(FILE_MODE))?;
         file.write_all(&serde_json::to_vec_pretty(rooms)?)?;
         file.sync_all()?;
         fs::rename(&next, self.path.join(ROOMS_FILE))?;
@@ -95,7 +120,7 @@ impl SessionDir {
     ///
     /// When the status file cannot be written.
     pub fn set_status(&self, status: &str) -> io::Result<()> {
-        fs::create_dir_all(&self.path)?;
+        self.create()?;
         fs::write(self.path.join(STATUS_FILE), status)
     }
 
@@ -113,11 +138,11 @@ impl SessionDir {
         if let Some(key) = self.read_key()? {
             return Ok(key);
         }
-        fs::create_dir_all(&self.path)?;
+        self.create()?;
         let candidate = self
             .path
             .join(format!("{KEY_FILE}.{:016x}", rand::random::<u64>()));
-        let mut file = fs::File::create_new(&candidate)?;
+        let mut file = private().create_new(true).open(&candidate)?;
         file.write_all(&SecretKey::generate().to_bytes())?;
         file.sync_all()?;
         let linked = fs::hard_link(&candidate, self.path.join(KEY_FILE));
@@ -153,9 +178,52 @@ impl SessionDir {
     }
 }
 
+/// The options that open a file for writing and create it with
+/// [`FILE_MODE`].
+fn private() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).mode(FILE_MODE);
+    options
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The permission bits of `path` for the group and for other users.
+    fn group_and_others(path: &Path) -> u32 {
+        let metadata = fs::metadata(path).expect("metadata");
+        metadata.permissions().mode() & 0o077
+    }
+
+    #[test]
+    fn only_the_user_can_read_the_key_and_the_rooms() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = SessionDir::new(root.path(), "s1");
+        session.secret_key().expect("key");
+        session.set_rooms(&[]).expect("write rooms");
+        for path in [
+            session.path().to_owned(),
+            session.path().join(KEY_FILE),
+            session.path().join(ROOMS_FILE),
+        ] {
+            assert_eq!(group_and_others(&path), 0, "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn a_directory_and_a_rooms_file_that_others_can_read_lose_that_mode() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session = SessionDir::new(root.path(), "s1");
+        fs::create_dir_all(session.path()).expect("create dir");
+        fs::set_permissions(session.path(), Permissions::from_mode(0o755)).expect("set mode");
+        let next = session.path().join(format!("{ROOMS_FILE}.next"));
+        fs::write(&next, "").expect("write");
+        fs::set_permissions(&next, Permissions::from_mode(0o644)).expect("set mode");
+        session.set_rooms(&[]).expect("write rooms");
+        assert_eq!(group_and_others(session.path()), 0);
+        assert_eq!(group_and_others(&session.path().join(ROOMS_FILE)), 0);
+    }
 
     #[test]
     fn a_session_without_a_key_has_no_public_key() {
