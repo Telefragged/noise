@@ -193,14 +193,18 @@
         pkgs:
         let
           # Builds only. The `test` check runs the tests.
-          noise = (cargoNixFor pkgs).workspaceMembers."noise".build;
+          build = (cargoNixFor pkgs).workspaceMembers."noise".build;
           inherit (cargoToml.workspace.package) version;
+          # The binary gets its version from Cargo.nix, so a version bump
+          # that skips `crate2nix generate` would ship the old version.
+          # The assert covers the package alone, so the devShell, which
+          # runs `crate2nix generate`, still evaluates.
+          noise =
+            assert
+              build.version == version
+              || throw "Cargo.nix has version ${build.version}, not ${version}: run crate2nix generate";
+            build;
         in
-        # The binary gets its version from Cargo.nix, so a version bump
-        # that skips `crate2nix generate` would ship the old version.
-        assert
-          noise.version == version
-          || throw "Cargo.nix has version ${noise.version}, not ${version}: run crate2nix generate";
         {
           inherit noise;
           default = noise;
