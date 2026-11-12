@@ -27,11 +27,6 @@ push to master whose version has no release tag yet makes the release
 workflow publish it. `nix run .#release-check` prints whether the
 workflow will publish a release.
 
-The release job is off until the first release, with `if: false` in
-`.github/workflows/release.yml`. Removing that line is the first release:
-no release tag exists, so the push that adds the change to master
-publishes the version in `Cargo.toml`.
-
 ## Wording
 
 These rules cover everything written for noise: code, comments, docs,
