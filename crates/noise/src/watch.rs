@@ -56,7 +56,7 @@ type Bind = fn() -> Result<Builder>;
 /// When the process does not run in a Claude Code session, or the state
 /// directory, the endpoint, or the socket fails.
 pub fn run(dir: &SessionDir) -> Result<()> {
-    std::fs::create_dir_all(dir.path())?;
+    dir.create()?;
     // The socket's path is relative to the state directory.
     std::env::set_current_dir(dir.path())?;
     let Some(_lock) = lock(Path::new(LOCK_FILE))? else {

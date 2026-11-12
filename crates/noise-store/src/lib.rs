@@ -1,8 +1,9 @@
 //! The files of each Claude Code session's state directory.
 //!
 //! Each session has its own directory under the state root, and no file
-//! is shared between sessions. No check covers a change to a session's
-//! directory by another local process.
+//! is shared between sessions. Only the user can enter a session's
+//! directory or read its key file and its rooms file. No check covers a
+//! change to a session's directory by another process of the user.
 
 mod session;
 
