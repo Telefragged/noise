@@ -11,7 +11,7 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::{ConnectionError, presets};
 use iroh_gossip::Gossip;
 use noise_room::{
-    Body, Member, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
+    Body, Member, PublicKey, Rejected, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -68,6 +68,13 @@ impl Session for TestSession {
         let rooms = self.rooms.lock().expect("lock");
         rooms.values().any(|(_, members)| members.contains(peer))
     }
+
+    /// The time of every message that the tests seal.
+    fn now(&self) -> Timestamp {
+        Timestamp(0)
+    }
+
+    fn rejected(&self, _room: &RoomId, _message: &Verified, _why: Rejected) {}
 
     fn receive(&self, room: &RoomId, message: Verified) {
         if let Some((_, members)) = self.rooms.lock().expect("lock").get_mut(room) {

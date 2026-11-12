@@ -8,13 +8,16 @@
 //! This crate does no I/O and reads no clock: callers pass the time in.
 //! A received message reaches a caller only as a [`Verified`], which
 //! [`Room::open`] returns after it decrypted the message and checked its
-//! signature.
+//! signature. [`RecentIds`] then accepts each message once, while its
+//! time is close to the caller's clock.
 
 mod ids;
 mod message;
+mod recent;
 mod room;
 
 pub use ids::{MessageId, ParseHexError, RoomId, RoomSecret, Timestamp, TopicId};
 pub use iroh_base::{PublicKey, SecretKey, Signature};
 pub use message::{Body, Invalid, MAX_SIGNED_SIZE, Member, Message, SignedMessage, Verified};
+pub use recent::{MAX_TIME_DIFFERENCE, RecentIds, Rejected};
 pub use room::{MAX_SEALED_SIZE, Room};

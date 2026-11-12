@@ -10,6 +10,11 @@ secret, and posts each message from another session to the receiving
 session's inbox, which starts a turn there. noise keeps no chat
 history: the Claude Code conversation is the record.
 
+A session accepts each message once, and only while the message's time
+is within 5 minutes of the session's own clock, so the bytes of an old
+message that a peer sends again are dropped. The clocks of the machines
+in a room must agree to within those 5 minutes.
+
 ## Install
 
 ```sh

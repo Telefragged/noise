@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -10,7 +11,7 @@ use iroh::{Endpoint, EndpointAddr};
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
 use iroh_gossip::{Gossip, TopicId as GossipTopicId};
 use n0_future::StreamExt;
-use noise_room::{PublicKey, Room, RoomId, Verified};
+use noise_room::{PublicKey, Rejected, Room, RoomId, Timestamp, Verified};
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -24,8 +25,16 @@ pub trait Session: Send + Sync + 'static {
     /// Whether `peer` is a member of at least one of the session's rooms.
     fn admits(&self, peer: &PublicKey) -> bool;
 
-    /// Handles `message`, which arrived through `room`'s gossip topic.
+    /// The session's clock.
+    fn now(&self) -> Timestamp;
+
+    /// Handles `message`, which arrived through `room`'s gossip topic for
+    /// the first time, with a time close to [`Session::now`].
     fn receive(&self, room: &RoomId, message: Verified);
+
+    /// `message` arrived through `room`'s gossip topic and the node
+    /// dropped it, because of `why`.
+    fn rejected(&self, room: &RoomId, message: &Verified, why: Rejected);
 
     /// This session's profile message for `room`, sealed. The node sends
     /// it when the room gets a neighbor, so that the room's members learn
@@ -216,12 +225,21 @@ impl<S: Session> Node<S> {
         let mut inbound = Inbound::new(self.inner.gossip.max_message_size());
         let mut first = Some(first);
         loop {
-            match receiver.next().await {
+            let wait = inbound.wait(session.now());
+            let event = tokio::select! {
+                event = receiver.next() => event,
+                () = sleep(wait), if wait.is_some() => {
+                    inbound.expire(session.now());
+                    continue;
+                }
+            };
+            match event {
                 Some(Ok(Event::Received(message))) => {
-                    if let Some(message) =
-                        inbound.received(&message.content, message.delivered_from, &room)
-                    {
-                        session.receive(&id, message);
+                    let (payload, from) = (&message.content, message.delivered_from);
+                    match inbound.received(payload, from, &room, session.now()) {
+                        Some(Ok(message)) => session.receive(&id, message),
+                        Some(Err((message, why))) => session.rejected(&id, &message, why),
+                        None => {}
                     }
                 }
                 Some(Ok(Event::NeighborUp(peer))) => {
@@ -257,6 +275,13 @@ impl<S: Session> Node<S> {
     fn emit(&self, event: NetEvent) {
         // Without observers there is nobody to tell.
         let _ = self.inner.events.send(event);
+    }
+}
+
+/// Sleeps for `wait`. Returns at once for `None`.
+async fn sleep(wait: Option<Duration>) {
+    if let Some(wait) = wait {
+        tokio::time::sleep(wait).await;
     }
 }
 
