@@ -9,14 +9,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use noise_net::{Admission, Redeemed, Session, Token};
 use noise_room::{
-    Body, Member, PublicKey, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
+    Body, Member, PublicKey, Rejected, Room, RoomId, RoomSecret, SecretKey, Timestamp, Verified,
 };
 use noise_store::{RoomRecord, SessionDir};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::delivery::{Arrival, RoomRef, Shown, display_name};
+use crate::delivery::{Arrival, RoomRef, Shown, display_name, short_key};
 
 /// How long a ticket stays valid after the session issued it.
 pub const TICKET_LIFETIME: Duration = Duration::from_hours(24);
@@ -362,6 +362,22 @@ impl Session for SessionState {
         self.lock()
             .values()
             .any(|entry| entry.members.contains_key(peer))
+    }
+
+    fn now(&self) -> Timestamp {
+        now()
+    }
+
+    fn rejected(&self, _room: &RoomId, message: &Verified, why: Rejected) {
+        // iroh-gossip delivers a message to a neighbor again when the
+        // session sends the same bytes twice, as with two profiles of one
+        // millisecond.
+        if why != Rejected::Repeated {
+            // The clocks of the two machines differ, or a peer sent the
+            // bytes of an old message again.
+            let author = short_key(&message.message().author);
+            eprintln!("noise: dropped a message by {author}: {why}");
+        }
     }
 
     fn receive(&self, room: &RoomId, message: Verified) {
