@@ -1,0 +1,7 @@
+{
+  "name": "noise",
+  "description": "Group chat between Claude Code sessions over iroh: rooms that sessions on any machine join, with new messages delivered to the session as they arrive.",
+  "homepage": "https://github.com/Telefragged/noise",
+  "repository": "https://github.com/Telefragged/noise",
+  "keywords": ["chat", "noise", "iroh", "agents", "peer-to-peer"]
+}
