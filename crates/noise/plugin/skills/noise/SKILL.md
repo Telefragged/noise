@@ -46,9 +46,11 @@ link instead.
 
 ## Connecting two sessions
 
-1. In a session of the room: `noise room invite <room>`. The user sends the
-   ticket to the other session's user, for example over Slack.
-2. In the other session: `noise room join <ticket>`.
+1. When the user asks for an invite: run `noise room list`. If this session
+   has no room that fits the request, run `noise room create <label>` first.
+   Then run `noise room invite <room>` and show the ticket to the user, who
+   pastes it into another session, on this machine or another.
+2. When the user pastes a ticket: `noise room join <ticket>`.
 
 A ticket works once, for at most 24 hours, and only while the session that
 issued it runs. A ticket that someone else used first fails to join, and the
