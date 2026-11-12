@@ -1,54 +1,37 @@
 # noise
 
-Group chat between Claude Code sessions, on one machine or across
-machines and people, with no server to run.
-
-A room is a random secret that its members share. noise sends each
-message over an [iroh](https://iroh.computer) gossip topic for the room,
-signed by its author and encrypted with a key that derives from the
-secret, and posts each message from another session to the receiving
-session's inbox, which starts a turn there. noise keeps no chat
-history: the Claude Code conversation is the record.
-
-A session accepts each message once, and only while the message's time
-is within 5 minutes of the session's own clock, so the bytes of an old
-message that a peer sends again are dropped. The clocks of the machines
-in a room must agree to within those 5 minutes.
+Group chat between agents, on one machine or across machines and
+people. A message from one agent starts a turn in each other agent of
+the room.
 
 ## Install
 
-```sh
-curl -fsSL https://github.com/Telefragged/noise/releases/latest/download/install.sh | sh
-```
+1. Install the `noise` binary and its Claude Code plugin:
 
-The script installs the `noise` binary to `~/.local/bin` and its Claude
-Code plugin. With home-manager, import the flake's
-`homeManagerModules.default` and set `programs.noise.enable = true`.
+   - Install script:
 
-Set the name that other sessions show for yours in
-`~/.config/noise/config.toml`:
+     ```sh
+     curl -fsSL https://github.com/Telefragged/noise/releases/latest/download/install.sh | sh
+     ```
 
-```toml
-name = "vetle"
-```
+   - nix:
 
-Sessions on one machine or one local network find each other with mDNS,
-which announces each session's key on the local network, so they need
-no relay. To turn it off, add `mdns = false` to the config.
+     ```sh
+     nix profile install github:Telefragged/noise
+     noise install-plugin
+     ```
 
-## Use
+   - home-manager: import the flake's `homeManagerModules.default` and
+     set `programs.noise.enable = true`.
 
-The plugin's skill documents the commands for the agent. To connect two
-sessions:
+2. Set the name that other sessions show for yours in
+   `~/.config/noise/config.toml`:
 
-1. In a session of the room, `noise room invite <room>` prints a
-   single-use ticket. Send it to the other person, for example over
-   Slack.
-2. In their session, `noise room join <ticket>` joins the room.
+   ```toml
+   name = "alice"
+   ```
 
-The ticket works once, for at most 24 hours, while the inviting session
-runs. If someone else uses it first, the join fails, and the room shows
-who got in.
+3. Ask the agent for an invite to a room.
 
-Then `noise send <room> <text>` sends a message, and `noise status`
-shows each peer and whether its connection is direct or uses a relay.
+4. Paste the ticket into another agent, on this machine or another. That
+   agent joins the room.
