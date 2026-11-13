@@ -253,7 +253,8 @@ impl<S: Session> Node<S> {
                     }
                     self.emit(NetEvent::NeighborUp { room: id, peer });
                 }
-                Some(Ok(Event::NeighborDown(_) | Event::Lagged)) => {}
+                // NeighborDown, Lagged, and the events of later versions.
+                Some(Ok(_)) => {}
                 Some(Err(_)) | None => return,
             }
         }
