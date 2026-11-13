@@ -83,54 +83,61 @@ impl Delivery {
         }
         self.first = None;
         self.last = None;
-        let mut lines = vec![LEAD.to_owned()];
+        let mut post = LEAD.to_owned();
         let mut current = None;
         for Arrival { room, event } in self.pending.drain(..) {
             if current != Some(room.id) {
                 current = Some(room.id);
-                let label = one_line(&room.label);
-                lines.push(format!("Noise - {label}"));
+                post.push_str("\nNoise - ");
+                clean_into(&mut post, &room.label, " ");
             }
-            lines.push(event_line(&event));
+            post.push('\n');
+            push_event(&mut post, &event);
         }
-        Some(lines.join("\n"))
+        Some(post)
     }
 }
 
-fn event_line(event: &Event) -> String {
+/// Adds the line of `event` to `post`.
+fn push_event(post: &mut String, event: &Event) {
+    let one_line = |post: &mut String, text: &str| clean_into(post, text, " ");
     match event {
         Event::Text { from, text } => {
-            format!("{}: {}", one_line(from), clean(text, TEXT_LINE_END))
+            one_line(post, from);
+            post.push_str(": ");
+            clean_into(post, text, TEXT_LINE_END);
         }
-        Event::Joined { by } => format!("a session joined, admitted by {}", one_line(by)),
+        Event::Joined { by } => {
+            post.push_str("a session joined, admitted by ");
+            one_line(post, by);
+        }
         Event::Renamed { from, to } => {
-            format!("{} changed its name to {}", one_line(from), one_line(to))
+            one_line(post, from);
+            post.push_str(" changed its name to ");
+            one_line(post, to);
         }
-        Event::Left { name } => format!("{} left", one_line(name)),
+        Event::Left { name } => {
+            one_line(post, name);
+            post.push_str(" left");
+        }
     }
 }
 
-/// `text` on one line.
-fn one_line(text: &str) -> String {
-    clean(text, " ")
-}
-
-/// `text` with `line_end` for each line end and a space for every other
-/// control character, so that the text ends a line only where `line_end`
-/// does.
-fn clean(text: &str, line_end: &str) -> String {
-    let mut cleaned = String::with_capacity(text.len());
+/// Adds `text` to `post`, with `line_end` for each line end and a space
+/// for every other control character, so that the text ends a line only
+/// where `line_end` does.
+fn clean_into(post: &mut String, text: &str, line_end: &str) {
+    post.reserve(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\r' if chars.peek() == Some(&'\n') => {}
-            '\n' | '\u{2028}' | '\u{2029}' => cleaned.push_str(line_end),
-            '\t' => cleaned.push(c),
-            c if c.is_control() => cleaned.push(' '),
-            c => cleaned.push(c),
+            '\n' | '\u{2028}' | '\u{2029}' => post.push_str(line_end),
+            '\t' => post.push(c),
+            c if c.is_control() => post.push(' '),
+            c => post.push(c),
         }
     }
-    cleaned
 }
 
 /// `name - status`, or the part that is not empty.
