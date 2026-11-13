@@ -7088,7 +7088,7 @@ rec {
       };
       "noise" = rec {
         crateName = "noise";
-        version = "0.3.0";
+        version = "0.3.1";
         edition = "2024";
         crateBin = [
           {
@@ -7192,7 +7192,7 @@ rec {
       };
       "noise-net" = rec {
         crateName = "noise-net";
-        version = "0.3.0";
+        version = "0.3.1";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/noise-net; };
         libName = "noise_net";
@@ -7252,7 +7252,7 @@ rec {
       };
       "noise-room" = rec {
         crateName = "noise-room";
-        version = "0.3.0";
+        version = "0.3.1";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/noise-room; };
         libName = "noise_room";
@@ -7300,7 +7300,7 @@ rec {
       };
       "noise-store" = rec {
         crateName = "noise-store";
-        version = "0.3.0";
+        version = "0.3.1";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/noise-store; };
         libName = "noise_store";
