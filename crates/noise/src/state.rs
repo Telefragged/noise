@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::delivery::{Arrival, RoomRef, Shown, display_name, short_key};
+use crate::delivery::{Arrival, Event, RoomRef, display_name, short_key};
 
 /// How long a ticket stays valid after the session issued it.
 pub const TICKET_LIFETIME: Duration = Duration::from_hours(24);
@@ -40,14 +40,14 @@ struct RoomMembers {
 
 impl RoomMembers {
     /// Records `name` and `status` for `key`, which wrote a message.
-    /// Returns whether that changed the members.
-    fn update(&mut self, key: PublicKey, name: &str, status: &str) -> bool {
+    /// Returns what the members had for `key` before.
+    fn update(&mut self, key: PublicKey, name: &str, status: &str) -> Option<Member> {
         let member = Member {
             key,
             name: name.to_owned(),
             status: status.to_owned(),
         };
-        self.members.insert(key, member.clone()) != Some(member)
+        self.members.insert(key, member)
     }
 
     /// Adds `key` without a name, unless it is a member already. Returns
@@ -67,6 +67,17 @@ impl RoomMembers {
             .get(key)
             .map(|member| display_name(&member.name, &member.status))
             .unwrap_or_default()
+    }
+
+    /// The name of `key` in a post: its display name, or its short key
+    /// when it has none.
+    fn posted_name(&self, key: &PublicKey) -> String {
+        let name = self.name_of(key);
+        if name.is_empty() {
+            short_key(key)
+        } else {
+            name
+        }
     }
 
     fn room_ref(&self) -> RoomRef {
@@ -389,47 +400,52 @@ impl Session for SessionState {
         };
         // Only a member has the room's key, so the author of a message
         // that opened is a member.
-        let (changed, arrival) = match &message.message().body {
-            Body::Text { name, status, .. } => {
-                let changed = entry.update(author, name, status);
-                let arrival = Shown::of(&message).map(|message| Arrival::Text {
-                    room: entry.room_ref(),
-                    message,
-                });
-                (changed, arrival)
+        let mut renamed = None;
+        let (changed, event) = match &message.message().body {
+            Body::Text { name, status, .. } | Body::Profile { name, status } => {
+                let old = entry.update(author, name, status);
+                let changed = old.as_ref() != entry.members.get(&author);
+                renamed = old
+                    .filter(|old| !old.name.is_empty() && old.name != *name)
+                    .map(|old| Event::Renamed {
+                        from: old.name,
+                        to: name.clone(),
+                    });
+                let text = match &message.message().body {
+                    Body::Text { text, .. } => Some(Event::Text {
+                        from: entry.posted_name(&author),
+                        text: text.clone(),
+                    }),
+                    _ => None,
+                };
+                (changed, text)
             }
-            Body::Profile { name, status } => (entry.update(author, name, status), None),
             Body::Admit { key } => {
                 let known = entry.add(author);
                 let new = entry.add(*key);
-                let arrival = (new && *key != me).then(|| Arrival::Joined {
-                    room: entry.room_ref(),
-                    key: *key,
-                    by: entry.name_of(&author),
+                let joined = (new && *key != me).then(|| Event::Joined {
+                    by: entry.posted_name(&author),
                 });
-                (known || new, arrival)
+                (known || new, joined)
             }
             Body::Leave => {
-                let name = entry.name_of(&author);
+                let name = entry.posted_name(&author);
                 let left = entry.members.remove(&author).is_some();
-                let arrival = left.then(|| Arrival::Left {
-                    room: entry.room_ref(),
-                    key: author,
-                    name,
-                });
-                (left, arrival)
+                (left, left.then_some(Event::Left { name }))
             }
             Body::Unknown => (entry.add(author), None),
         };
+        let room = entry.room_ref();
         if changed && let Err(err) = self.save(&rooms) {
             eprintln!("noise: {err:#}");
         }
         drop(rooms);
-        if author != me
-            && let Some(arrival) = arrival
-        {
-            // A closed channel means the process is ending.
-            let _ = self.arrivals.send(arrival);
+        if author != me {
+            for event in renamed.into_iter().chain(event) {
+                let room = room.clone();
+                // A closed channel means the process is ending.
+                let _ = self.arrivals.send(Arrival { room, event });
+            }
         }
     }
 
@@ -571,12 +587,15 @@ mod tests {
         let other = key(7);
         let id = fixture.room.id();
         let sent = message(&fixture.room, &other, text("hi", "peer"));
-        fixture.state.receive(&id, sent.clone());
+        fixture.state.receive(&id, sent);
         match fixture.arrivals.try_recv().expect("an arrival") {
-            Arrival::Text { message, room } => {
-                assert_eq!(message.id, sent.id());
-                assert_eq!(room.label, "ci");
-            }
+            Arrival {
+                room,
+                event: Event::Text { from, text },
+            } => assert_eq!(
+                (room.label.as_str(), from.as_str(), text.as_str()),
+                ("ci", "peer", "hi")
+            ),
             other => panic!("expected a text, got {other:?}"),
         }
         assert_eq!(
@@ -604,12 +623,62 @@ mod tests {
             .state
             .receive(&id, message(&fixture.room, &other, admit));
         match fixture.arrivals.try_recv().expect("an arrival") {
-            Arrival::Joined { key, by, .. } => {
-                assert_eq!((key, by.as_str()), (newcomer.public(), "peer"));
-            }
+            Arrival {
+                event: Event::Joined { by },
+                ..
+            } => assert_eq!(by, "peer"),
             other => panic!("expected a join, got {other:?}"),
         }
         assert!(fixture.state.admits(&newcomer.public()));
+    }
+
+    /// The events that `body` from `author` posts.
+    fn events(fixture: &mut Fixture, author: &SecretKey, body: Body) -> Vec<Event> {
+        let id = fixture.room.id();
+        fixture
+            .state
+            .receive(&id, message(&fixture.room, author, body));
+        std::iter::from_fn(|| fixture.arrivals.try_recv().ok())
+            .map(|arrival| arrival.event)
+            .collect()
+    }
+
+    fn renamed(from: &str, to: &str) -> Event {
+        Event::Renamed {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    #[test]
+    fn a_text_with_a_new_name_posts_a_rename_before_the_text() {
+        let mut fixture = fixture();
+        let other = key(7);
+        events(&mut fixture, &other, text("hi", "peer"));
+        let text_event = Event::Text {
+            from: "renamed".into(),
+            text: "hi".into(),
+        };
+        assert_eq!(
+            events(&mut fixture, &other, text("hi", "renamed")),
+            [renamed("peer", "renamed"), text_event]
+        );
+    }
+
+    #[test]
+    fn a_profile_posts_a_rename_and_no_status_change() {
+        let mut fixture = fixture();
+        let other = key(7);
+        let profile = |name: &str, status: &str| Body::Profile {
+            name: name.into(),
+            status: status.into(),
+        };
+        assert_eq!(events(&mut fixture, &other, profile("peer", "")), []);
+        assert_eq!(events(&mut fixture, &other, profile("peer", "busy")), []);
+        assert_eq!(
+            events(&mut fixture, &other, profile("renamed", "busy")),
+            [renamed("peer", "renamed")]
+        );
     }
 
     #[test]
@@ -626,7 +695,7 @@ mod tests {
             .receive(&id, message(&fixture.room, &other, Body::Leave));
         assert!(matches!(
             fixture.arrivals.try_recv().expect("an arrival"),
-            Arrival::Left { name, .. } if name == "peer"
+            Arrival { event: Event::Left { name }, .. } if name == "peer"
         ));
         assert!(!fixture.state.admits(&other.public()));
     }
