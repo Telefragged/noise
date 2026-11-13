@@ -1,6 +1,7 @@
 //! The session's rooms and their members, as the node and the CLI use
 //! them.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -88,11 +89,13 @@ impl RoomMembers {
     }
 }
 
-/// The room of a ticket that the session issued, and when the ticket
-/// expires.
+/// The room of a ticket that the session issued, when the ticket
+/// expires, and the key of the only session that can redeem it, if the
+/// ticket has one.
 struct Issued {
     room: RoomId,
     expires: Instant,
+    key: Option<PublicKey>,
 }
 
 /// A room, as `noise room list` prints it.
@@ -278,12 +281,13 @@ impl SessionState {
     }
 
     /// The single-use token of a new ticket to `room`, which stays valid
-    /// for [`TICKET_LIFETIME`] or until this process ends.
+    /// for [`TICKET_LIFETIME`] or until this process ends. With `key`,
+    /// only the session with that key can redeem the ticket.
     ///
     /// # Errors
     ///
     /// When the session has no such room.
-    pub fn issue_ticket(&self, room: &RoomId) -> Result<Token> {
+    pub fn issue_ticket(&self, room: &RoomId, key: Option<PublicKey>) -> Result<Token> {
         if !self.lock().contains_key(room) {
             bail!("the session has no room {room}");
         }
@@ -291,6 +295,7 @@ impl SessionState {
         let issued = Issued {
             room: *room,
             expires: Instant::now() + TICKET_LIFETIME,
+            key,
         };
         lock(&self.tickets).insert(token, issued);
         Ok(token)
@@ -456,9 +461,17 @@ impl Session for SessionState {
     }
 
     fn redeem(&self, token: &Token, peer: PublicKey) -> Result<Redeemed, String> {
-        let issued = lock(&self.tickets)
-            .remove(token)
-            .ok_or("the ticket was used already, or this session did not issue it")?;
+        // A ticket for another key stays valid, so a session that sees
+        // the ticket cannot use it up before its session does.
+        let issued = match lock(&self.tickets).entry(*token) {
+            Entry::Occupied(entry) if entry.get().key.is_some_and(|key| key != peer) => {
+                return Err("the ticket is for another session".into());
+            }
+            Entry::Occupied(entry) => entry.remove(),
+            Entry::Vacant(_) => {
+                return Err("the ticket was used already, or this session did not issue it".into());
+            }
+        };
         if issued.expires < Instant::now() {
             return Err("the ticket expired".into());
         }
@@ -712,7 +725,7 @@ mod tests {
     fn a_ticket_redeems_once() {
         let fixture = fixture();
         let (id, peer) = (fixture.room.id(), key(9).public());
-        let token = fixture.state.issue_ticket(&id).expect("ticket");
+        let token = fixture.state.issue_ticket(&id, None).expect("ticket");
         let redeemed = fixture.state.redeem(&token, peer).expect("redeem");
         assert_eq!(redeemed.room, id);
         assert_eq!(redeemed.admission.secret, *fixture.room.secret());
@@ -721,6 +734,22 @@ mod tests {
         assert!(fixture.state.admits(&peer));
         assert!(fixture.state.redeem(&token, key(10).public()).is_err());
         assert!(!fixture.state.admits(&key(10).public()));
+    }
+
+    #[test]
+    fn a_ticket_for_a_key_redeems_only_for_that_key() {
+        let fixture = fixture();
+        let (id, invited, other) = (fixture.room.id(), key(9).public(), key(10).public());
+        let token = fixture
+            .state
+            .issue_ticket(&id, Some(invited))
+            .expect("ticket");
+        let refused = fixture.state.redeem(&token, other).expect_err("refused");
+        assert!(refused.contains("another session"), "{refused}");
+        assert!(!fixture.state.admits(&other));
+        let redeemed = fixture.state.redeem(&token, invited).expect("redeem");
+        assert_eq!(redeemed.room, id);
+        assert!(fixture.state.admits(&invited));
     }
 
     #[test]
@@ -733,7 +762,7 @@ mod tests {
             .expect("session state");
         let token = fixture
             .state
-            .issue_ticket(&fixture.room.id())
+            .issue_ticket(&fixture.room.id(), None)
             .expect("ticket");
         let redeemed = fixture
             .state

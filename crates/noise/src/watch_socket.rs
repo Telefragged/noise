@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use noise_room::{MessageId, RoomId};
+use noise_room::{MessageId, PublicKey, RoomId};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -39,8 +39,13 @@ pub enum Request {
     Send { room: String, text: String },
     /// Set the session's status and announce it in every room.
     SetStatus { status: String },
-    /// Return a new single-use ticket to a room.
-    Invite { room: String },
+    /// Return a new single-use ticket to a room. With `key`, only the
+    /// session with that key can use the ticket.
+    Invite {
+        room: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<PublicKey>,
+    },
     /// Join the room of a ticket.
     Join { ticket: String },
     /// Leave a room.

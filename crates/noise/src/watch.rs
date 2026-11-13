@@ -220,8 +220,8 @@ impl Watch {
                 }
                 Response::Ok
             }
-            Request::Invite { room } => {
-                let token = state.issue_ticket(&state.resolve(&room)?)?;
+            Request::Invite { room, key } => {
+                let token = state.issue_ticket(&state.resolve(&room)?, key)?;
                 let ticket = Ticket {
                     inviter: self.node().await?.endpoint().addr(),
                     token,
@@ -424,7 +424,14 @@ mod tests {
     }
 
     async fn invite(watch: &Arc<Watch>, room: &str) -> String {
-        let invited = reply(watch, Request::Invite { room: room.into() }).await;
+        let invited = reply(
+            watch,
+            Request::Invite {
+                room: room.into(),
+                key: None,
+            },
+        )
+        .await;
         let Response::Ticket { ticket } = invited else {
             panic!("expected a ticket, got {invited:?}");
         };
@@ -548,6 +555,44 @@ mod tests {
         let again = reply(&c, Request::Join { ticket }).await;
         assert!(matches!(again, Response::Error { .. }), "{again:?}");
         assert!(!a.state.admits(&c.state.key().public()));
+        for watch in [&a, &b, &c] {
+            stop(watch).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ticket_for_a_key_joins_only_the_session_with_that_key() {
+        let roots: Vec<_> = (0..3)
+            .map(|_| tempfile::tempdir().expect("tempdir"))
+            .collect();
+        let (a, _) = watch(roots[0].path(), "a").await;
+        let (b, _) = watch(roots[1].path(), "b").await;
+        let (c, _) = watch(roots[2].path(), "c").await;
+        let room = create(&a, "ci").await;
+        let invited = reply(
+            &a,
+            Request::Invite {
+                room: "ci".into(),
+                key: Some(b.state.key().public()),
+            },
+        )
+        .await;
+        let Response::Ticket { ticket } = invited else {
+            panic!("expected a ticket, got {invited:?}");
+        };
+
+        let refused = reply(
+            &c,
+            Request::Join {
+                ticket: ticket.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(refused, Response::Error { .. }), "{refused:?}");
+        assert!(!a.state.admits(&c.state.key().public()));
+        let joined = reply(&b, Request::Join { ticket }).await;
+        assert_eq!(joined, Response::Joined { room });
+        assert!(a.state.admits(&b.state.key().public()));
         for watch in [&a, &b, &c] {
             stop(watch).await;
         }
