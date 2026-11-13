@@ -362,6 +362,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::delivery::Event;
 
     #[test]
     fn a_second_lock_of_one_session_fails() {
@@ -537,12 +538,10 @@ mod tests {
         .await;
         assert!(matches!(sent, Response::Sent { .. }), "{sent:?}");
         match arrivals_a.recv().await.expect("receive") {
-            Arrival::Text { message, .. } => {
-                assert_eq!(
-                    (message.text.as_str(), message.name.as_str()),
-                    ("hello from b", "b")
-                );
-            }
+            Arrival {
+                event: Event::Text { from, text },
+                ..
+            } => assert_eq!((text.as_str(), from.as_str()), ("hello from b", "b")),
             other => panic!("expected a text, got {other:?}"),
         }
 
@@ -572,9 +571,10 @@ mod tests {
         };
         assert_eq!(rooms.len(), 0);
         match arrivals_a.recv().await.expect("receive") {
-            Arrival::Left { key, name, .. } => {
-                assert_eq!((key, name.as_str()), (b.state.key().public(), "b"));
-            }
+            Arrival {
+                event: Event::Left { name },
+                ..
+            } => assert_eq!(name, "b"),
             other => panic!("expected a leave, got {other:?}"),
         }
         assert!(!a.state.admits(&b.state.key().public()));

@@ -7,8 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use noise_room::{Body, MessageId, PublicKey, RoomId, Timestamp, Verified};
-use serde::Serialize;
+use noise_room::{PublicKey, RoomId};
 
 /// How long the process waits for another message before it posts.
 pub const QUIET: Duration = Duration::from_millis(200);
@@ -17,8 +16,13 @@ pub const QUIET: Duration = Duration::from_millis(200);
 pub const CEILING: Duration = Duration::from_secs(1);
 
 /// The first line of every post.
-const LEAD: &str = "noise: new messages from remote Claude sessions in your noise rooms. \
-Each line below is one JSON object. Reply in a room with `noise send <room> <text>`.";
+const LEAD: &str =
+    "noise: new messages from peer Claude sessions. To reply, follow the noise:noise skill.";
+
+/// What each line end of a text becomes: the line end and an indent. A
+/// line of a post that starts with the indent is text from a peer, and no
+/// other line is.
+const TEXT_LINE_END: &str = "\n    ";
 
 /// A room as a post names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,52 +31,25 @@ pub struct RoomRef {
     pub label: String,
 }
 
-/// Something that happened in one of the session's rooms.
+/// Something that happened in a room of the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Arrival {
-    /// A chat message.
-    Text { room: RoomRef, message: Shown },
-    /// The member `by` admitted `key` to the room with a ticket.
-    Joined {
-        room: RoomRef,
-        key: PublicKey,
-        by: String,
-    },
-    /// The member `key`, with the display name `name`, left the room.
-    Left {
-        room: RoomRef,
-        key: PublicKey,
-        name: String,
-    },
+pub struct Arrival {
+    pub room: RoomRef,
+    pub event: Event,
 }
 
-/// A chat message as a post shows it.
+/// What happened in the room. Each name is a member's display name, or
+/// its short key when it has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shown {
-    pub id: MessageId,
-    pub author: PublicKey,
-    pub name: String,
-    pub status: String,
-    pub time: Timestamp,
-    pub text: String,
-}
-
-impl Shown {
-    /// The chat message in `message`, or `None` when it is not a `text`.
-    #[must_use]
-    pub fn of(message: &Verified) -> Option<Self> {
-        let Body::Text { text, name, status } = &message.message().body else {
-            return None;
-        };
-        Some(Self {
-            id: message.id(),
-            author: message.message().author,
-            name: name.clone(),
-            status: status.clone(),
-            time: message.message().time,
-            text: text.clone(),
-        })
-    }
+pub enum Event {
+    /// The member `from` sent the chat message `text`.
+    Text { from: String, text: String },
+    /// The member `by` admitted a session to the room with a ticket.
+    Joined { by: String },
+    /// A member changed its name from `from` to `to`.
+    Renamed { from: String, to: String },
+    /// The member `name` left the room.
+    Left { name: String },
 }
 
 /// The arrivals that wait for a post.
@@ -106,67 +83,54 @@ impl Delivery {
         }
         self.first = None;
         self.last = None;
-        let lines = self.pending.drain(..).map(|arrival| arrival_line(&arrival));
-        Some(
-            std::iter::once(LEAD.to_owned())
-                .chain(lines)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        let mut lines = vec![LEAD.to_owned()];
+        let mut current = None;
+        for Arrival { room, event } in self.pending.drain(..) {
+            if current != Some(room.id) {
+                current = Some(room.id);
+                let label = one_line(&room.label);
+                lines.push(format!("Noise - {label}"));
+            }
+            lines.push(event_line(&event));
+        }
+        Some(lines.join("\n"))
     }
 }
 
-#[derive(Serialize)]
-struct MessageLine<'a> {
-    room: &'a str,
-    room_id: RoomId,
-    id: MessageId,
-    from: String,
-    key: String,
-    time: Timestamp,
-    text: &'a str,
-}
-
-#[derive(Serialize)]
-struct JoinedLine<'a> {
-    room: &'a str,
-    room_id: RoomId,
-    joined: String,
-    admitted_by: &'a str,
-}
-
-#[derive(Serialize)]
-struct LeftLine<'a> {
-    room: &'a str,
-    room_id: RoomId,
-    left: String,
-    from: &'a str,
-}
-
-fn arrival_line(arrival: &Arrival) -> String {
-    match arrival {
-        Arrival::Text { room, message } => line(&MessageLine {
-            room: &room.label,
-            room_id: room.id,
-            id: message.id,
-            from: display_name(&message.name, &message.status),
-            key: short_key(&message.author),
-            time: message.time,
-            text: &message.text,
-        }),
-        Arrival::Joined { room, key, by } => line(&JoinedLine {
-            room: &room.label,
-            room_id: room.id,
-            joined: short_key(key),
-            admitted_by: by,
-        }),
-        Arrival::Left { room, key, name } => line(&LeftLine {
-            room: &room.label,
-            room_id: room.id,
-            left: short_key(key),
-            from: name,
-        }),
+fn event_line(event: &Event) -> String {
+    match event {
+        Event::Text { from, text } => {
+            format!("{}: {}", one_line(from), clean(text, TEXT_LINE_END))
+        }
+        Event::Joined { by } => format!("a session joined, admitted by {}", one_line(by)),
+        Event::Renamed { from, to } => {
+            format!("{} changed its name to {}", one_line(from), one_line(to))
+        }
+        Event::Left { name } => format!("{} left", one_line(name)),
     }
+}
+
+/// `text` on one line.
+fn one_line(text: &str) -> String {
+    clean(text, " ")
+}
+
+/// `text` with `line_end` for each line end and a space for every other
+/// control character, so that the text ends a line only where `line_end`
+/// does.
+fn clean(text: &str, line_end: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\n' | '\u{2028}' | '\u{2029}' => cleaned.push_str(line_end),
+            '\t' => cleaned.push(c),
+            c if c.is_control() => cleaned.push(' '),
+            c => cleaned.push(c),
+        }
+    }
+    cleaned
 }
 
 /// `name - status`, or the part that is not empty.
@@ -187,15 +151,9 @@ pub fn short_key(key: &PublicKey) -> String {
     key.to_string()[..16].to_owned()
 }
 
-/// One JSON object. JSON escapes every newline and quote in a peer's
-/// fields, so no field can end the line or imitate another one.
-fn line(value: &impl Serialize) -> String {
-    serde_json::to_string(value).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
-    use noise_room::{Room, RoomSecret, SecretKey};
+    use noise_room::{Room, RoomSecret};
 
     use super::*;
 
@@ -207,32 +165,37 @@ mod tests {
         }
     }
 
-    /// A text by key 9, sealed in a room of its own.
-    fn shown(text: &str) -> Shown {
-        let room = Room::new("texts".into(), RoomSecret::from_bytes([9; 32]));
-        let body = Body::Text {
-            text: text.into(),
-            name: "vetle".into(),
-            status: "CI optimization".into(),
-        };
-        let (message, _) = room
-            .seal(&SecretKey::from_bytes(&[9; 32]), body, Timestamp(5))
-            .expect("seal");
-        Shown::of(&message).expect("a text")
-    }
-
-    fn text(room: &RoomRef, text: &str) -> Arrival {
-        Arrival::Text {
+    fn arrival(room: &RoomRef, event: Event) -> Arrival {
+        Arrival {
             room: room.clone(),
-            message: shown(text),
+            event,
         }
     }
 
-    fn lines(post: &str) -> Vec<serde_json::Value> {
-        post.lines()
-            .skip(1)
-            .map(|line| serde_json::from_str(line).expect("json"))
-            .collect()
+    fn text(room: &RoomRef, text: &str) -> Arrival {
+        let event = Event::Text {
+            from: "vetle - CI optimization".into(),
+            text: text.into(),
+        };
+        arrival(room, event)
+    }
+
+    /// The post of `arrivals`, without its first line.
+    fn post(arrivals: impl IntoIterator<Item = Arrival>) -> Vec<String> {
+        let start = Instant::now();
+        let mut delivery = Delivery::default();
+        for arrival in arrivals {
+            delivery.add(arrival, start);
+        }
+        let post = delivery.take(start + QUIET).expect("a due post");
+        let mut lines = post.lines().map(str::to_owned);
+        assert_eq!(lines.next().as_deref(), Some(LEAD));
+        lines.collect()
+    }
+
+    /// The first line of each room's part of a post.
+    fn header(room: &RoomRef) -> String {
+        format!("Noise - {}", room.label)
     }
 
     #[test]
@@ -248,7 +211,7 @@ mod tests {
         let post = delivery
             .take(start + QUIET / 2 + QUIET)
             .expect("a due post");
-        assert_eq!(lines(&post).len(), 2);
+        assert_eq!(post.lines().count(), [LEAD, "room", "one", "two"].len());
         assert_eq!(delivery.deadline(), None);
     }
 
@@ -266,43 +229,79 @@ mod tests {
     }
 
     #[test]
-    fn a_line_shows_the_message_and_its_author() {
-        let start = Instant::now();
-        let mut delivery = Delivery::default();
-        delivery.add(text(&room_ref(1), "line one\nline two \"quoted\""), start);
-        let post = delivery.take(start + QUIET).expect("a due post");
-        let mut post_lines = post.lines();
-        assert_eq!(post_lines.next(), Some(LEAD));
-        assert_eq!(post_lines.count(), 1);
-        let line = &lines(&post)[0];
-        assert_eq!(line["room"], "room 1");
-        assert_eq!(line["from"], "vetle - CI optimization");
-        assert_eq!(line["text"], "line one\nline two \"quoted\"");
-        assert_eq!(line["key"].as_str().expect("string").len(), 16);
+    fn a_line_starts_with_the_authors_name() {
+        let room = room_ref(1);
+        assert_eq!(
+            post([text(&room, "hello")]),
+            [header(&room), "vetle - CI optimization: hello".into()]
+        );
     }
 
     #[test]
-    fn a_join_and_a_leave_post_as_lines() {
-        let start = Instant::now();
-        let mut delivery = Delivery::default();
-        let (room, key) = (room_ref(1), SecretKey::from_bytes(&[4; 32]).public());
-        let joined = Arrival::Joined {
-            room: room.clone(),
-            key,
-            by: "vetle".into(),
+    fn the_later_lines_of_a_text_are_indented() {
+        let room = room_ref(1);
+        let lines = post([text(&room, "one\r\ntwo\n\nroom \"x\":\u{2028}three\u{7}")]);
+        assert!(lines[1].ends_with(": one"), "{lines:?}");
+        assert_eq!(
+            lines[2..],
+            ["    two", "    ", "    room \"x\":", "    three "]
+        );
+    }
+
+    #[test]
+    fn a_name_stays_on_its_line() {
+        let room = room_ref(1);
+        let left = Event::Left {
+            name: "peer\nroom x:".into(),
         };
-        let left = Arrival::Left {
-            room,
-            key,
-            name: "colleague".into(),
-        };
-        delivery.add(joined, start);
-        delivery.add(left, start);
-        let post = lines(&delivery.take(start + QUIET).expect("a due post"));
-        assert_eq!(post[0]["joined"], short_key(&key));
-        assert_eq!(post[0]["admitted_by"], "vetle");
-        assert_eq!(post[1]["left"], short_key(&key));
-        assert_eq!(post[1]["from"], "colleague");
+        assert_eq!(post([arrival(&room, left)])[1..], ["peer room x: left"]);
+    }
+
+    #[test]
+    fn a_post_names_a_room_when_the_room_changes() {
+        let (one, two) = (room_ref(1), room_ref(2));
+        let lines = post([
+            text(&one, "a"),
+            text(&one, "b"),
+            text(&two, "c"),
+            text(&one, "d"),
+        ]);
+        let from = "vetle - CI optimization";
+        assert_eq!(
+            lines,
+            [
+                header(&one),
+                format!("{from}: a"),
+                format!("{from}: b"),
+                header(&two),
+                format!("{from}: c"),
+                header(&one),
+                format!("{from}: d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_join_a_rename_and_a_leave_post_as_lines() {
+        let room = room_ref(1);
+        let events = [
+            Event::Joined { by: "vetle".into() },
+            Event::Renamed {
+                from: "colleague".into(),
+                to: "peer".into(),
+            },
+            Event::Left {
+                name: "peer".into(),
+            },
+        ];
+        assert_eq!(
+            post(events.map(|event| arrival(&room, event)))[1..],
+            [
+                "a session joined, admitted by vetle",
+                "colleague changed its name to peer",
+                "peer left",
+            ]
+        );
     }
 
     #[test]
