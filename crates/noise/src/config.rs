@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// The settings that every session of the user shares.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// The fixed part of each session's display name, such as `vetle`.
@@ -17,15 +17,6 @@ pub struct Config {
     /// mDNS and look other sessions up there, so that sessions on one
     /// machine or network find each other without a relay.
     pub mdns: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            mdns: true,
-        }
-    }
 }
 
 impl Config {
@@ -75,12 +66,12 @@ mod tests {
     }
 
     #[test]
-    fn mdns_is_on_unless_the_file_turns_it_off() {
+    fn mdns_is_off_unless_the_file_turns_it_on() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        assert!(Config::read(&path).expect("config").mdns);
-        std::fs::write(&path, "mdns = false\n").expect("write");
         assert!(!Config::read(&path).expect("config").mdns);
+        std::fs::write(&path, "mdns = true\n").expect("write");
+        assert!(Config::read(&path).expect("config").mdns);
     }
 
     #[test]
