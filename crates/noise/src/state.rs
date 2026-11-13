@@ -550,6 +550,13 @@ mod tests {
         }
     }
 
+    fn profile(name: &str, status: &str) -> Body {
+        Body::Profile {
+            name: name.into(),
+            status: status.into(),
+        }
+    }
+
     /// `body` by `author`, sealed for `room` and opened again.
     fn message(room: &Room, author: &SecretKey, body: Body) -> Verified {
         let (_, sealed) = room.seal(author, body, Timestamp(5)).expect("seal");
@@ -609,13 +616,9 @@ mod tests {
         let mut fixture = fixture();
         let (other, newcomer) = (key(7), key(8));
         let id = fixture.room.id();
-        let profile = Body::Profile {
-            name: "peer".into(),
-            status: String::new(),
-        };
         fixture
             .state
-            .receive(&id, message(&fixture.room, &other, profile));
+            .receive(&id, message(&fixture.room, &other, profile("peer", "")));
         let admit = Body::Admit {
             key: newcomer.public(),
         };
@@ -669,10 +672,6 @@ mod tests {
     fn a_profile_posts_a_rename_and_no_status_change() {
         let mut fixture = fixture();
         let other = key(7);
-        let profile = |name: &str, status: &str| Body::Profile {
-            name: name.into(),
-            status: status.into(),
-        };
         assert_eq!(events(&mut fixture, &other, profile("peer", "")), []);
         assert_eq!(events(&mut fixture, &other, profile("peer", "busy")), []);
         assert_eq!(
