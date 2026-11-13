@@ -2434,19 +2434,6 @@ rec {
         libName = "find_msvc_tools";
 
       };
-      "fixedbitset" = rec {
-        crateName = "fixedbitset";
-        version = "0.5.7";
-        edition = "2021";
-        sha256 = "16fd3v9d2cms2vddf9xhlm56sz4j0zgrk3d2h6v1l7hx760lwrqx";
-        authors = [
-          "bluss"
-        ];
-        features = {
-          "default" = [ "std" ];
-          "serde" = [ "dep:serde" ];
-        };
-      };
       "fnv" = rec {
         crateName = "fnv";
         version = "1.0.7";
@@ -2623,49 +2610,6 @@ rec {
           "std" = [ "alloc" "futures-core/std" ];
         };
         resolvedDefaultFeatures = [ "alloc" "default" "futures-sink" "sink" "std" ];
-      };
-      "futures-concurrency" = rec {
-        crateName = "futures-concurrency";
-        version = "7.7.1";
-        edition = "2021";
-        sha256 = "19lfx85mc4p15pj86bsyzv2f7690iw47bylgy63mpm71m76dhp0p";
-        libName = "futures_concurrency";
-        authors = [
-          "Yoshua Wuyts <yoshuawuyts@gmail.com>"
-        ];
-        dependencies = [
-          {
-            name = "fixedbitset";
-            packageId = "fixedbitset";
-            optional = true;
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "futures-core";
-            packageId = "futures-core";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "futures-lite";
-            packageId = "futures-lite";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "pin-project";
-            packageId = "pin-project";
-          }
-          {
-            name = "smallvec";
-            packageId = "smallvec";
-            optional = true;
-          }
-        ];
-        features = {
-          "alloc" = [ "dep:fixedbitset" "dep:smallvec" "futures-lite/alloc" ];
-          "default" = [ "std" ];
-          "std" = [ "alloc" "futures-lite/std" ];
-        };
-        resolvedDefaultFeatures = [ "alloc" "default" "std" ];
       };
       "futures-core" = rec {
         crateName = "futures-core";
@@ -5047,10 +4991,10 @@ rec {
       };
       "iroh-gossip" = rec {
         crateName = "iroh-gossip";
-        version = "0.101.0";
+        version = "0.102.0";
         edition = "2021";
         crateBin = [];
-        sha256 = "05bmfk5dfvalkjsi7srsmyq73miz7jv1wlrvx2ws3rvkbyqc87af";
+        sha256 = "08krqm02apq491gk36dc00c2vr37lakiji52i8dzb8rnv706g0pp";
         libName = "iroh_gossip";type = [ "cdylib" "rlib" ];
         authors = [
           "n0 team"
@@ -5073,11 +5017,6 @@ rec {
             name = "derive_more";
             packageId = "derive_more";
             features = [ "add" "debug" "deref" "display" "from" "try_into" "into" ];
-          }
-          {
-            name = "futures-concurrency";
-            packageId = "futures-concurrency";
-            optional = true;
           }
           {
             name = "hex";
@@ -5132,6 +5071,10 @@ rec {
             features = [ "std_rng" ];
           }
           {
+            name = "rustc-hash";
+            packageId = "rustc-hash";
+          }
+          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
@@ -5168,14 +5111,14 @@ rec {
           {
             name = "tokio";
             packageId = "tokio";
-            features = [ "io-util" "sync" "rt" "macros" "net" "fs" ];
+            features = [ "io-util" "sync" "rt" "macros" "net" "fs" "test-util" ];
           }
         ];
         features = {
           "default" = [ "net" "metrics" ];
           "examples" = [ "net" ];
           "metrics" = [ "iroh-metrics/metrics" ];
-          "net" = [ "dep:irpc" "dep:iroh" "dep:tokio" "dep:tokio-util" "dep:futures-concurrency" ];
+          "net" = [ "dep:irpc" "dep:iroh" "dep:tokio" "dep:tokio-util" ];
           "rpc" = [ "dep:irpc" "dep:tokio" "dep:noq" "irpc/rpc" "irpc/noq_endpoint_setup" ];
           "rpc-tls-aws-lc-rs" = [ "noq/aws-lc-rs" ];
           "rpc-tls-ring" = [ "noq/ring" ];
