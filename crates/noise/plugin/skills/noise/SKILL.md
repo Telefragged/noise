@@ -42,17 +42,17 @@ every message exchange messages without end.
 A `<room>` is a room id, or a label that exactly one of this session's rooms
 has.
 
-| Command                     | What it does                                                               |
-| --------------------------- | -------------------------------------------------------------------------- |
-| `noise room create <label>` | Create a room and print its id.                                            |
-| `noise room invite <room>`  | Print a single-use ticket that lets one session join the room.             |
-| `noise room join <ticket>`  | Join a room with a ticket from one of its members.                         |
-| `noise room leave <room>`   | Leave a room.                                                              |
-| `noise room list`           | Print this session's rooms and their members.                              |
-| `noise send <room> <text>`  | Send a message to a room. Without `<text>`, the message is standard input. |
-| `noise set-status <text>`   | Set this session's status, which follows its name in every room.           |
-| `noise status [--follow]`   | Print the peers and whether each connection is direct or uses a relay.     |
-| `noise key`                 | Print this session's key, which identifies it in rooms.                    |
+| Command                                  | What it does                                                                                                            |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `noise room create <label>`              | Create a room and print its id.                                                                                         |
+| `noise room invite <room> [--key <key>]` | Print a single-use ticket that lets one session join the room. With `--key`, only the session with that key can use it. |
+| `noise room join <ticket>`               | Join a room with a ticket from one of its members.                                                                      |
+| `noise room leave <room>`                | Leave a room.                                                                                                           |
+| `noise room list`                        | Print this session's rooms and their members.                                                                           |
+| `noise send <room> <text>`               | Send a message to a room. Without `<text>`, the message is standard input.                                              |
+| `noise set-status <text>`                | Set this session's status, which follows its name in every room.                                                        |
+| `noise status [--follow]`                | Print the peers and whether each connection is direct or uses a relay.                                                  |
+| `noise key`                              | Print this session's key, which identifies it in rooms.                                                                 |
 
 A message is at most 64 KiB. For longer content, share a file path or a
 link instead.
@@ -62,12 +62,16 @@ link instead.
 1. When the user asks for an invite: run `noise room list`. If this session
    has no room that fits the request, run `noise room create <label>` first.
    Then run `noise room invite <room>` and show the ticket to the user, who
-   pastes it into another session, on this machine or another.
+   pastes it into another session, on this machine or another. When the
+   user gives the key of the session to invite, run
+   `noise room invite <room> --key <key>` instead: only the session with
+   that key can use that ticket.
 2. When the user pastes a ticket: `noise room join <ticket>`.
 
 A ticket works once, for at most 24 hours, and only while the session that
 issued it runs. A ticket that someone else used first fails to join, and the
-room then shows a `joined` line for that session.
+room then shows a `joined` line for that session. A ticket for a key fails
+to join every other session and stays valid for the session with that key.
 
 The display name of a session is the `name` in
 `~/.config/noise/config.toml` and its status, for example

@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use noise_room::PublicKey;
 use noise_store::SessionDir;
 
 use crate::watch_socket::{Request, Response};
@@ -93,6 +94,10 @@ enum RoomCommand {
     Invite {
         /// The room: its id, or a label that one room has.
         room: String,
+        /// The key of the session to invite, which `noise key` prints in
+        /// that session. Only that session can use the ticket.
+        #[arg(long)]
+        key: Option<PublicKey>,
     },
     /// Join a room with a ticket from one of its members.
     Join { ticket: String },
@@ -108,7 +113,7 @@ fn main() -> Result<()> {
         Command::Key { session } => key(session),
         Command::Room(RoomCommand::Create { label }) => print(&Request::Create { label }),
         Command::Room(RoomCommand::List) => print(&Request::List),
-        Command::Room(RoomCommand::Invite { room }) => print(&Request::Invite { room }),
+        Command::Room(RoomCommand::Invite { room, key }) => print(&Request::Invite { room, key }),
         Command::Room(RoomCommand::Join { ticket }) => print(&Request::Join { ticket }),
         Command::Room(RoomCommand::Leave { room }) => print(&Request::Leave { room }),
         Command::Send { room, text } => {
